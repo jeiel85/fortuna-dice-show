@@ -12,6 +12,7 @@
 ![Web Audio](https://img.shields.io/badge/Web%20Audio-synth%20SFX-1DB954)
 ![No Assets](https://img.shields.io/badge/external%20assets-0-success)
 ![No Build](https://img.shields.io/badge/build-none-lightgrey)
+[![Smoke test](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml/badge.svg)](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ### [▶ 바로 플레이하기 (라이브 데모)](https://jeiel85.github.io/fortuna-dice-show/)
@@ -76,7 +77,7 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 | 🛡️ **전사** | 60 | **🔁 재굴림**: 턴마다 2회(Lv5부터 3회) 주사위를 다시 굴림 | 튼튼한 몸으로 버티며 마음에 안 드는 눈은 힘으로 바꾼다 |
 | 🗡️ **도적** | 52 | **🫳 슬쩍하기**: 사용한 눈의 합이 10이 되면 충전. 적 장비를 훔쳐 이번 전투에서 쓰고, 그 장비의 예고도 취소 | 적의 무기로 적을 친다 |
 | 🔮 **마법사** | 46 | **📖 스펠북**: 주문은 매 턴 2~3개만 펼쳐짐. 연속 시전 시 **연계 보너스** 누적, 페이지 넘기기로 교체 | 주문 연계로 한 턴에 몰아치는 폭발력 (장비 8칸) |
-| 🎲 **도박사** | 44 | **🎰 올인**: 주사위 하나를 50% 확률로 6, 50% 확률로 1로. 패시브: 주사위 +1개 | 여신이 가장 아끼는 광대. 모든 것을 건다 |
+| 🎲 **도박사** | 46 | **🎰 올인**: 주사위 하나를 50% 확률로 6, 50% 확률로 1로. 패시브: 주사위 +1개 | 여신이 가장 아끼는 광대. 모든 것을 건다 |
 
 <div align="center">
 <img src="docs/classes.png" alt="클래스 선택" width="820">
@@ -131,11 +132,18 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 | 키 | 동작 |
 |:---:|---|
 | `1` ~ `9` | 주사위 선택 |
-| `E` / `Enter` | 턴 종료 |
+| `Tab` → `Enter` / `Space` | 장비 카드·맵 노드로 이동해 실행 (선택한 주사위를 넣거나, 들어갈 수 있는 가장 높은 주사위를 자동 투입) |
+| `E` (포커스가 없을 땐 `Enter`) | 턴 종료 |
 | `R` | 클래스 스킬 |
 | `Esc` | 선택 취소 / 창 닫기 |
 
 상단 바에서 사운드를 켜고 끌 수 있고, 연출 속도는 1x·2x·3x 중에서 고를 수 있습니다.
+장비 카드·적 예고·주사위 트레이에는 스크린리더용 설명(`aria-label`)이 붙어 있고, 알림은 라이브 영역으로 읽힙니다.
+
+### 📊 전투 기록
+
+메뉴(☰) → **📊 전투 기록**에서 보스별 도전 횟수, 승률, 평균 턴, 평균 체력 손실과 최근 전투를 볼 수 있습니다.
+기록은 이 브라우저에만 저장되고 외부로 전송되지 않습니다. **JSON 복사** 버튼으로 내보낼 수 있어 밸런스 피드백에 쓸 수 있습니다.
 
 ## 🛠️ 기술 메모
 
@@ -144,15 +152,33 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 - **트레이 물리**: 속도 감쇠, 벽 반사, 주사위끼리의 원형 충돌. 충돌 강도에 맞춰 달그락 소리가 납니다.
 - **적 AI**: 굴린 주사위를 조건이 까다로운 장비부터 백트래킹으로 채워 예고를 만듭니다.
 - **효과 미리보기**: 장비 효과 함수를 기록 전용 컨텍스트로 실행해 적 예고와 예상 피해를 계산합니다.
-- **저장**: 게임 상태 전체가 JSON 직렬화 가능한 순수 데이터라서, 행동할 때마다 `localStorage`에 기록하고 전투 도중 새로고침해도 같은 주사위, 같은 예고 상태로 이어집니다.
+- **저장**: 게임 상태 전체가 JSON 직렬화 가능한 순수 데이터라서, 행동할 때마다 `localStorage`에 기록하고 전투 도중 새로고침해도 같은 주사위, 같은 예고 상태로 이어집니다. 불러올 때 구조를 검증해 손상된 전투·방 데이터는 맵에서 이어가고, 알 수 없는 버전은 거부합니다. 저장할 수 없는 환경이면 화면에 알립니다.
+- **비활성 탭 대응**: 탭이 가려져 `requestAnimationFrame`이 멈춰도 타이머가 대신 연출을 진행해 턴이 멈추지 않습니다.
 - **밸런스 점검**: 브라우저에서 탐욕 알고리즘 자동 플레이 봇으로 4개 클래스를 반복 플레이하며 보스 체력과 적 구성을 조정했습니다.
+
+## 🧪 테스트
+
+```bash
+node tests/smoke.mjs
+```
+
+Node 22 이상과 Chrome(또는 Chromium, Edge)이 필요합니다. 헤드리스 Chrome으로 게임을 띄워 다음을 확인합니다.
+
+1. 주사위 조건, 적 AI 배치, 3D 주사위 정면 눈 방향 같은 핵심 규칙
+2. 전투 중 저장·복구, 손상되거나 호환되지 않는 세이브 처리
+3. 최종 보스 격파 → 승리 화면, 세이브 삭제, 기록 반영
+4. 4개 클래스 자동 플레이(탐욕 봇)로 전체 흐름을 돌리며 런타임 에러와 진행 멈춤 감지
+
+`SMOKE_BUDGET_S`(클래스당 시간 예산, 초)와 `SMOKE_CLASSES`(예: `gambler,gambler,gambler`)로 조정할 수 있습니다. `main` 푸시와 PR마다 GitHub Actions에서 실행됩니다.
 
 ## 📂 구조
 
 ```
 fortuna-dice-show/
-├── index.html   # 게임 전체 (약 1,800줄)
-├── docs/        # README 스크린샷
+├── index.html              # 게임 전체 (약 1,900줄)
+├── tests/smoke.mjs         # 헤드리스 Chrome 스모크 테스트
+├── .github/workflows/      # CI (스모크 테스트)
+├── docs/                   # README 스크린샷
 ├── LICENSE
 └── README.md
 ```

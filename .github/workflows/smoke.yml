@@ -1,0 +1,20 @@
+name: Smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Headless Chrome smoke test
+        env:
+          SMOKE_BUDGET_S: '60'
+        run: node tests/smoke.mjs

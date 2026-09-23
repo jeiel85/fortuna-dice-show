@@ -34,6 +34,8 @@ body::before{content:"";position:fixed;inset:-20% 0 0 0;pointer-events:none;back
 @keyframes pulse{50%{outline-color:transparent}}
 @keyframes glow{50%{box-shadow:0 3px 0 #a86f12,0 0 22px #ffd54a}}
 #screen{position:relative;flex:1;min-height:0;overflow:auto}
+.card:focus-visible,.pickgrid .card:focus-visible{outline:3px solid #7ff;outline-offset:3px}
+.node:focus{outline:none}.node:focus-visible circle{stroke:#7ff;stroke-width:1.6}
 #fx{position:fixed;left:0;top:0;pointer-events:none;z-index:80}
 /* ---------- cards ---------- */
 .cards{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;align-content:center}
@@ -214,6 +216,10 @@ svg.map line.next{stroke:#ffe08acc;stroke-width:.8}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
 .stats div{background:#0005;border-radius:12px;padding:10px}
 .stats b{display:block;font-size:22px;color:var(--gold)}
+.tblwrap{overflow-x:auto}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th,.tbl td{padding:6px 8px;border-bottom:1px solid #ffffff18;text-align:left;white-space:nowrap}
+.tbl th{color:var(--gold2);font-weight:800}
 .bagcols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 /* ---------- responsive ---------- */
 @media (max-width:900px){
@@ -256,7 +262,7 @@ svg.map line.next{stroke:#ffe08acc;stroke-width:.8}
 <canvas id="fx"></canvas>
 <div id="modal"></div>
 <div id="tip"></div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script>
 'use strict';
 /* =====================================================================
@@ -525,7 +531,7 @@ const CL={
   warrior:{n:'전사',i:'🛡️',hp:60,c:'#ff6b7d',d:'강인한 체력으로 버티며, 마음에 들지 않는 눈은 힘으로 다시 굴려버린다.',sk:'재굴림',ski:'🔁',skd:'턴마다 2회(Lv5부터 3회), 주사위 하나를 다시 굴립니다.',it:['sword','greatsword','woodshield','plus']},
   thief:{n:'도적',i:'🗡️',hp:52,c:'#5fe0a0',d:'재빠른 손놀림. 적의 장비를 훔쳐 그들의 무기로 싸운다.',sk:'슬쩍하기',ski:'🫳',skd:'사용한 주사위 눈의 합이 10에 도달하면 충전됩니다. 적의 장비 하나를 훔쳐 이번 전투 동안 사용하고, 그 장비의 예고 행동도 취소시킵니다.',it:['dagger','dagger','buckler','whip']},
   mage:{n:'마법사',i:'🔮',hp:46,c:'#b77bff',d:'스펠북의 주문을 연계해 폭발적인 마법을 쏟아낸다.',sk:'페이지 넘기기',ski:'📖',skd:'장착한 주문은 스펠북에 들어가 매 턴 2개(Lv5부터 3개)만 펼쳐집니다. 한 턴에 주문을 연속으로 쓰면 연계 보너스(피해·회복 +1씩 누적). 턴마다 1회(Lv5부터 2회) 페이지를 넘겨 다른 주문을 펼칩니다. 장비 슬롯 8칸.',it:['fireball','icelance','heal','woodshield','flip']},
-  gambler:{n:'도박사',i:'🎲',hp:44,c:'#f5c542',d:'여신이 가장 아끼는 광대. 주사위를 하나 더 굴리고, 언제나 모든 것을 건다.',sk:'올인',ski:'🎰',skd:'턴마다 1회(Lv5부터 2회), 주사위 하나를 50% 확률로 6, 50% 확률로 1로 바꿉니다. 패시브: 주사위 +1개.',it:['luckblade','coin','buckler','pot']},
+  gambler:{n:'도박사',i:'🎲',hp:46,c:'#f5c542',d:'여신이 가장 아끼는 광대. 주사위를 하나 더 굴리고, 언제나 모든 것을 건다.',sk:'올인',ski:'🎰',skd:'턴마다 1회(Lv5부터 2회), 주사위 하나를 50% 확률로 6, 50% 확률로 1로 바꿉니다. 패시브: 주사위 +1개.',it:['luckblade','coin','executioner','buckler']},
 };
 
 const NODE={fight:{i:'⚔️',n:'전투'},elite:{i:'💀',n:'엘리트'},treasure:{i:'🎁',n:'보물 상자'},apple:{i:'🍎',n:'회복 사과'},shop:{i:'🛒',n:'상점'},forge:{i:'🔨',n:'대장간'},event:{i:'🎡',n:'여신의 이벤트'},boss:{i:'👑',n:'보스룸'}};
@@ -549,9 +555,65 @@ const line=(k,e)=>pick(LINES[k]).replace('{e}',e||'');
 let S=null;          // 현재 런 상태 (전부 JSON 직렬화 가능)
 let VIEW='title';    // 런이 없을 때의 화면 (title | cls)
 const UI={busy:false,sel:null,mode:null,hideIntents:false,drag:null,flashQ:[]};
-function save(){if(!S||S.dead)return;try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){console.warn('저장 실패',e)}}
-function loadSave(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.v===1&&CL[s.cls])return s}catch(e){}return null}
+const SAVE_V=1;
+let saveWarned=false,loadNote=null;
+function storageOK(){try{localStorage.setItem('__fortuna_probe','1');localStorage.removeItem('__fortuna_probe');return true}catch(e){return false}}
+function save(){
+  if(!S||S.dead)return;
+  try{localStorage.setItem(KEY,JSON.stringify(S))}
+  catch(e){console.warn('저장 실패',e);if(!saveWarned){saveWarned=true;toast('⚠ 진행 상황을 저장하지 못했습니다. 사생활 보호 모드이거나 저장 공간이 부족할 수 있어요.',6000)}}
+}
+// ---------- 세이브 검증 ----------
+const num=v=>typeof v==='number'&&isFinite(v);
+const validItem=it=>!!(it&&IT[it.id]&&(it.u===0||it.u===1));
+const SCREENS=['floor','map','combat','reward','shop','treasure','apple','forge','event'];
+const CTX_OK={
+  reward:x=>x&&x.enemy&&Array.isArray(x.items)&&x.items.every(validItem),
+  shop:x=>x&&Array.isArray(x.stock)&&x.stock.every(validItem),
+  treasure:x=>x&&Array.isArray(x.items)&&x.items.every(validItem),
+  event:x=>x&&['roulette','duel','deal'].includes(x.type),
+  apple:x=>!!x,forge:x=>!!x,
+};
+function validSave(s){
+  if(!s||typeof s!=='object'||!CL[s.cls])return false;
+  if(!['hp','maxhp','gold','level','xp','floor'].every(k=>num(s[k])))return false;
+  if(s.floor<1||s.floor>FL.length||s.level<1||s.level>10||s.maxhp<1)return false;
+  if(!Array.isArray(s.eq)||!s.eq.length||!Array.isArray(s.bag)||![...s.eq,...s.bag].every(validItem))return false;
+  if(!Array.isArray(s.map)||!s.map.length||!s.map.every(r=>Array.isArray(r)&&r.length&&r.every(n=>n&&NODE[n.t]&&Array.isArray(n.l))))return false;
+  if(s.pos&&!(s.map[s.pos.r]&&s.map[s.pos.r][s.pos.i]))return false;
+  return SCREENS.includes(s.screen)&&!!s.st&&typeof s.st==='object';
+}
+function validCombat(C){
+  if(!C||!C.E||!EN[C.E.key]||!num(C.E.hp)||!Array.isArray(C.E.cards)||!Array.isArray(C.cards)||!Array.isArray(C.dice)||!C.pst)return false;
+  if(![...C.E.cards,...C.cards].every(c=>c&&IT[c.id]&&Array.isArray(c.placed||[])))return false;
+  if(!Array.isArray(C.hand)||!C.hand.every(i=>C.cards[i]))return false;
+  return C.dice.every(d=>d&&[1,2,3,4,5,6].includes(d.v));
+}
+// 저장 형식이 바뀌면 이전 버전을 여기서 변환한다. 알 수 없는 버전은 거부.
+function migrate(s){return s&&s.v===SAVE_V?s:null}
+function loadSave(){
+  loadNote=null;let raw;
+  try{raw=localStorage.getItem(KEY)}catch(e){return null}
+  if(!raw)return null;
+  let s;try{s=migrate(JSON.parse(raw))}catch(e){s=null}
+  if(!validSave(s)){loadNote='저장 데이터가 손상되었거나 호환되지 않아 불러올 수 없습니다.';return null}
+  if(s.screen==='combat'&&!validCombat(s.combat)){s.combat=null;s.screen='map';loadNote='전투 데이터가 손상되어 맵에서 이어갑니다.'}
+  else if(CTX_OK[s.screen]&&!CTX_OK[s.screen](s.ctx)){s.ctx=null;s.screen='map';loadNote='방 데이터가 손상되어 맵에서 이어갑니다.'}
+  if(s.screen!=='combat')s.combat=null;
+  // 보스방 직후 복구된 경우: 맵에 갈 곳이 없으므로 다음 층으로
+  if(s.screen==='map'&&s.pos&&s.pos.r>=s.map.length-1){s.floor=Math.min(FL.length,s.floor+1);s.map=genMap();s.pos=null;s.screen='floor'}
+  return s;
+}
 function wipeSave(){try{localStorage.removeItem(KEY)}catch(e){}}
+// ---------- 플레이 기록 (보스 밸런스 측정용, 브라우저에만 저장) ----------
+const LOGKEY='fortuna-dice-log-v1';
+function getLog(){try{const l=JSON.parse(localStorage.getItem(LOGKEY));return Array.isArray(l)?l:[]}catch(e){return []}}
+function logFight(won){
+  const C=S.combat;if(!C)return;
+  const l=getLog();
+  l.push({t:Date.now(),cls:S.cls,lv:S.level,floor:S.floor,en:C.E.key,kind:C.kind,turns:C.turn,hp0:C.hp0??S.hp,hp1:Math.max(0,S.hp),maxhp:S.maxhp,won:won?1:0});
+  try{localStorage.setItem(LOGKEY,JSON.stringify(l.slice(-400)))}catch(e){}
+}
 function getBest(){try{return JSON.parse(localStorage.getItem(BESTKEY))}catch(e){return null}}
 function recordBest(win){
   const b=getBest()||{floor:0,wins:0};
@@ -760,7 +822,7 @@ function floatAt(sel,text,color,cls=''){
 function bump(sel){const el=$(sel);if(!el)return;el.classList.remove('hit');void el.offsetWidth;el.classList.add('hit')}
 function shakeScreen(){const el=$('#screen');el.classList.remove('shake');void el.offsetWidth;el.classList.add('shake')}
 function announce(t){const a=$('#ann');if(!a)return;a.textContent=t;a.classList.remove('show');void a.offsetWidth;a.classList.add('show')}
-function toast(t){const b=$('#toast'),d=document.createElement('div');d.textContent=t;b.appendChild(d);setTimeout(()=>d.remove(),2400)}
+function toast(t,ms=2400){const b=$('#toast'),d=document.createElement('div');d.textContent=t;b.appendChild(d);setTimeout(()=>d.remove(),ms)}
 
 // =====================================================================
 //  전투 엔진
@@ -855,7 +917,7 @@ const RESTRICT={eq:0,same:1,min:2,rg:2,max:3,odd:3,even:3,any:5,cd:9};
 // 적 AI: 주사위를 굴려 예고(인텐트) 슬롯에 배치
 function planIntents(){
   const C=S.combat,E=C.E;
-  E.cards.forEach(c=>{c.intent=null;c.done=0;c.off=0});
+  E.cards.forEach(c=>{c.intent=null;c.done=0;c.dn=0;c.off=0});
   const vals=[];for(let i=0;i<E.dice;i++)vals.push(d6());
   if(E.pas==='fickle')vals[R(0,vals.length-1)]=6;
   const pool=vals.map(v=>({id:'e'+(C.nid++),v,burn:0,fr:0}));
@@ -945,12 +1007,12 @@ function startCombat(kind,key,opt={}){
   const d=EN[key],hp=opt.hp||d.hp;
   const E={key,n:d.n,i:d.i,hp,maxhp:hp,block:0,st:{},dice:d.d,pas:d.pas||null,enr:0,idle:[],cards:d.it.map(([id,u])=>mkCard(id,u||0))};
   const cards=S.eq.map(it=>{const c=mkCard(it.id,it.u);if(S.cls==='mage'&&IT[it.id].type==='spell')c.sp=1;return c});
-  S.combat={E,cards,kind,pb:0,pst:{},dice:[],nid:1,turn:1,phase:'start',chain:0,steal:0,sk:0,hand:[],eroll:[],eStart:0,over:0};
+  S.combat={E,cards,kind,pb:0,pst:{},dice:[],nid:1,turn:1,phase:'start',chain:0,steal:0,sk:0,hand:[],eroll:[],eStart:0,over:0,hp0:S.hp};
   S.screen='combat';S.lastEn=key;save();
   UI.busy=true;render();
   if(kind==='boss'){SFX.boss();announce(line('boss',d.n)+(d.t?'  — “'+d.t+'”':''))}
   else announce(line(kind==='elite'?'elite':'start',d.n));
-  setTimeout(()=>startPlayerTurn(true),700/SET.speed);
+  const C0=S.combat;setTimeout(()=>{if(alive(C0))startPlayerTurn(true)},700/SET.speed);
 }
 async function startPlayerTurn(first){
   const C=S&&S.combat;if(!C||C.over)return;
@@ -996,7 +1058,7 @@ async function endTurn(){
   Tray.fadeAll();C.dice=[];C.cards.forEach(c=>c.placed=[]);
   if(C.pst.weak)C.pst.weak--;
   C.phase='enemy';C.eStart=0;save();render();
-  await sleep(300);
+  await sleep(300);if(!alive(C))return;
   await enemyTurn();
 }
 async function enemyTurn(){
@@ -1013,7 +1075,9 @@ async function enemyTurn(){
     const conds=IT[c.id].slots(c.u);
     UI.flashQ.push(`#ecards [data-eci="${ci}"]`);render();
     await sleep(260);if(!alive(C))return;
-    for(const g of c.intent){
+    // 행동 단위로 진행도를 저장해, 새로고침 후 이어가도 같은 행동이 두 번 실행되지 않게 한다
+    for(let gi=c.dn||0;gi<c.intent.length;gi++){
+      const g=c.intent[gi];c.dn=gi+1;
       const burned=g.filter(d=>d.burn).length;
       if(burned){loseHp('e',burned*2,'🔥');if(checkEnd())return}
       if(conds[0].t==='cd'){
@@ -1021,13 +1085,13 @@ async function enemyTurn(){
         if(c.cd<=0){c.cd=conds[0].n;IT[c.id].act(makeCtx('e',c),[0],c.u)}else SFX.tick();
       }else IT[c.id].act(makeCtx('e',c),g.map(d=>d.v),c.u);
       if(checkEnd())return;
-      render();await sleep(380);if(!alive(C))return;
+      save();render();await sleep(380);if(!alive(C))return;
     }
     c.done=1;save();render();
   }
   if(E.st.weak)E.st.weak--;
   C.turn++;save();
-  await sleep(250);
+  await sleep(250);if(!alive(C))return;
   await startPlayerTurn(false);
 }
 
@@ -1078,6 +1142,7 @@ function rollItems(n,minRar=1,epic=false){
   return out;
 }
 function win(){
+  logFight(true);
   const C=S.combat,E=C.E,kind=C.kind,f=S.floor;
   const gold=Math.round((R(7,12)+f*4)*(kind==='elite'?1.8:kind==='boss'?3:1));
   const xp=kind==='boss'?3:kind==='elite'?2:1,dice0=diceCount(),lv0=S.level;
@@ -1092,20 +1157,22 @@ function win(){
   const el=$('#e-por');if(el)el.classList.add('dead');
   announce(line('win'));SFX.fanfare();if(S.level>lv0)setTimeout(()=>SFX.levelup(),1500);
   Tray.fadeAll();
-  setTimeout(()=>{UI.busy=false;Tray.detach();render()},1500/SET.speed);
+  const s0=S;setTimeout(()=>{if(S!==s0)return;UI.busy=false;Tray.detach();render()},1500/SET.speed);
 }
 function lose(){
+  logFight(false);
   S.combat=null;S.screen='gameover';S.dead=1;recordBest(false);wipeSave();
   UI.busy=true;FX.ghost=null;SFX.defeat();
   const el=$('#p-por');if(el)el.classList.add('dead');
   announce('쇼가… 끝났습니다.');
-  setTimeout(()=>{UI.busy=false;Tray.detach();render()},1600/SET.speed);
+  const s0=S;setTimeout(()=>{if(S!==s0)return;UI.busy=false;Tray.detach();render()},1600/SET.speed);
 }
 
 // =====================================================================
 //  화면 렌더링
 // =====================================================================
 const descHTML=s=>String(s).replace(/■/g,'<i class="dv"></i>');
+const plain=s=>String(s).replace(/<[^>]+>/g,'').replace(/■/g,'주사위 눈').replace(/\s+/g,' ').trim();
 const TIPS=['적의 예고(빨간 주사위)를 보고 막을지, 먼저 쓰러뜨릴지 정하세요.','도구 장비로 주사위 눈을 바꿔 조건을 맞춰 보세요. 뒤집개는 1을 6으로 만들어요!','빙결은 적이 예고한 가장 높은 주사위를 1로 만들어요. 조건이 깨지면 행동이 통째로 무산돼요!','감전은 적의 예고 행동 하나를 즉시 취소해요.','카운트다운 장비는 여러 턴에 걸쳐 눈을 모아도 돼요.','대장간·상점에서 강화하면 조건이 완화되거나 효과가 커져요.','레벨 3과 6에 주사위가 하나씩 늘어나요.','방어도는 내 다음 턴이 시작되면 사라져요. 아끼지 마세요!','불탄 주사위는 쓸 때마다 체력 2를 잃어요. 그래도 쓸 가치가 있다면야~','보스는 체력이 절반 이하가 되면 화를 낸답니다.','주사위를 끌어다 놓거나, 클릭으로 고른 뒤 장비를 클릭하세요. 숫자키 1~9로도 고를 수 있어요.'];
 
 function render(){
@@ -1157,7 +1224,10 @@ function renderTitle(){
       ${sv?`<button class="btn glow" data-a="cont">▶ 이어하기 <small>${sv.floor}층 · ${CL[sv.cls].n} Lv${sv.level} · ❤️${sv.hp}</small></button>`:''}
       <button class="btn ${sv?'alt':'glow'}" data-a="new">🎲 새 게임</button>
       <button class="btn alt" data-a="help">📜 게임 방법</button>
+      ${getLog().length?'<button class="btn alt" data-a="stats">📊 전투 기록</button>':''}
     </div>
+    ${!storageOK()?'<div class="warn" style="font-size:13px">⚠ 이 브라우저에서는 진행 상황을 저장할 수 없습니다. (사생활 보호 모드 또는 저장소 차단)</div>':''}
+    ${loadNote?`<div class="warn" style="font-size:13px">⚠ ${loadNote}</div>`:''}
     ${best?`<div class="best">🏆 최고 기록: ${best.floor}층 도달${CL[best.cls]?' ('+CL[best.cls].n+')':''} · 여신 격파 ${best.wins||0}회</div>`:''}
   </div>`;
   TitleFx.init($('#titlecv'));
@@ -1167,7 +1237,8 @@ function renderTitle(){
     else if(b.dataset.a==='new'){
       if(sv)confirmBox('새 게임을 시작하면 진행 중인 모험이 삭제됩니다. 계속할까요?',()=>{wipeSave();VIEW='cls';render()});
       else{VIEW='cls';render()}
-    }else openHelp();
+    }else if(b.dataset.a==='stats')openStats();
+    else openHelp();
   };
 }
 function resume(){
@@ -1259,7 +1330,7 @@ function renderMap(){
     const cur=S.pos&&S.pos.r===r&&S.pos.i===i;
     n.l.forEach(j=>{const m=rows[r+1][j];const cls=n.v&&m.v?'done':cur&&av.has((r+1)+':'+j)?'next':'';
       lines+=`<line class="${cls}" x1="${n.x*100}" y1="${Y(r)}" x2="${m.x*100}" y2="${Y(r+1)}"/>`});
-    nodes+=`<g class="node ${av.has(r+':'+i)?'avail':''} ${n.v?'visited':''} ${cur?'cur':''} ${n.t==='boss'?'boss':''}" data-r="${r}" data-i="${i}" transform="translate(${n.x*100} ${Y(r)})"><title>${NODE[n.t].n}</title><circle r="${n.t==='boss'?6.5:5}"/><text>${NODE[n.t].i}</text></g>`;
+    nodes+=`<g class="node ${av.has(r+':'+i)?'avail':''} ${n.v?'visited':''} ${cur?'cur':''} ${n.t==='boss'?'boss':''}" data-r="${r}" data-i="${i}" ${av.has(r+':'+i)?`tabindex="0" role="button" aria-label="${NODE[n.t].n} (선택 가능)"`:''} transform="translate(${n.x*100} ${Y(r)})"><title>${NODE[n.t].n}</title><circle r="${n.t==='boss'?6.5:5}"/><text>${NODE[n.t].i}</text></g>`;
   }));
   $('#screen').innerHTML=`<div class="mapwrap">
     <div class="mapbox"><h2>${S.floor}층 · ${FL[S.floor-1].n}</h2><div class="sub">${S.pos?'다음 방을 선택하세요':'출발할 방을 선택하세요'} — 빛나는 노드를 클릭</div>
@@ -1307,11 +1378,11 @@ function combatShell(){
   return`<div id="combat" data-cid="${S.combat.cid}">
     <div class="ez"><div class="fighter"><div class="por" id="e-por"></div><div class="fname" id="e-name"></div><div class="bar" id="e-hp"></div><div class="chips" id="e-chips"></div></div>
       <div class="cards ecards" id="ecards"></div></div>
-    <div id="ann"></div>
+    <div id="ann" role="status" aria-live="polite"></div>
     <div class="pz"><div class="cards" id="pcards"></div></div>
     <div class="tz">
       <div class="pinfo fighter"><div class="por small" id="p-por"></div><div class="fname" id="p-name"></div><div class="bar" id="p-hp"></div><div class="chips" id="p-chips"></div><div class="warn" id="p-warn"></div></div>
-      <div class="traywrap"><canvas id="tray"></canvas></div>
+      <div class="traywrap"><canvas id="tray" role="img" aria-label="주사위 트레이"></canvas></div>
       <div class="acts" id="acts"></div>
     </div></div>`;
 }
@@ -1355,7 +1426,8 @@ function ecardHTML(c,ci){
   const it=show&&c.intent&&!c.done?`<div class="intent">${intentText(c)}</div>`:'';
   const idle=show&&!c.intent&&!c.off&&!c.stolen&&S.combat.phase==='player';
   const cls=['card','t-'+d.type,c.done?'used':'',c.off?'off':'',c.stolen?'stolen':'',idle?'dim':''].join(' ');
-  return`<div class="${cls}" data-eci="${ci}" data-item="${c.id}:${c.u}" data-off="${c.stolen?'🫳 도둑맞음':'⚡ 감전'}"><div class="c-head"><span class="c-ico">${d.icon}</span><span class="c-name">${d.name}${c.u?'<b class="plus">+</b>':''}</span></div><div class="c-slots col">${rows}</div><div class="c-desc">${descHTML(d.desc(c.u))}</div>${it}</div>`;
+  const aria=`적 장비 ${d.name}. ${c.stolen?'도둑맞음':c.off?'감전으로 취소됨':c.done?'실행 완료':show&&c.intent?'예고: '+plain(intentText(c)):'예고 없음'}`;
+  return`<div class="${cls}" data-eci="${ci}" data-item="${c.id}:${c.u}" data-off="${c.stolen?'🫳 도둑맞음':'⚡ 감전'}" tabindex="0" aria-label="${esc(aria)}"><div class="c-head"><span class="c-ico">${d.icon}</span><span class="c-name">${d.name}${c.u?'<b class="plus">+</b>':''}</span></div><div class="c-slots col">${rows}</div><div class="c-desc">${descHTML(d.desc(c.u))}</div>${it}</div>`;
 }
 function updEnemy(){
   const C=S.combat,E=C.E;
@@ -1373,9 +1445,15 @@ function pcardHTML(c,ci){
   const uses=d.perCombat?`<span class="c-uses">전투 ${c.uses}</span>`:um>1?`<span class="c-uses">${c.uses}/${um}</span>`:'';
   const badge=c.temp?'<span class="badge g">훔침</span>':(c.sp&&C.chain>0?`<span class="badge">연계 +${C.chain}</span>`:'');
   const cls=['card','t-'+d.type,c.uses<=0?'used':'',c.off?'off':'',can?'can':'',sd&&!can?'dim':'',c.temp?'temp':'',c.sp?'book':''].join(' ');
-  return`<div class="${cls}" data-ci="${ci}" data-item="${c.id}:${c.u}" data-off="⚡ 감전"><div class="c-head"><span class="c-ico">${d.icon}</span><span class="c-name">${d.name}${c.u?'<b class="plus">+</b>':''}</span>${uses}</div><div class="c-slots">${slots}</div><div class="c-desc">${descHTML(d.desc(c.u))}</div>${badge}</div>`;
+  const state=c.off?'감전으로 봉인됨':c.uses<=0?'이번 턴 사용 완료':can?'선택한 주사위를 넣을 수 있음':'';
+  const aria=`${d.name}${c.u?' 강화':''}, ${TYPEN[d.type]}. 조건 ${cd?`카운트다운 ${c.cd} 남음`:conds.map(condText).join(' + ')}. 효과 ${plain(d.desc(c.u))}.${um>1?` 남은 사용 ${c.uses}회.`:''}${c.placed.some(Boolean)?` 들어간 주사위 ${c.placed.filter(Boolean).map(p=>p.v).join(', ')}.`:''} ${state}`;
+  return`<div class="${cls}" data-ci="${ci}" data-item="${c.id}:${c.u}" data-off="⚡ 감전" tabindex="0" role="button" aria-label="${esc(aria)}"${c.uses<=0||c.off?' aria-disabled="true"':''}><div class="c-head"><span class="c-ico">${d.icon}</span><span class="c-name">${d.name}${c.u?'<b class="plus">+</b>':''}</span>${uses}</div><div class="c-slots">${slots}</div><div class="c-desc">${descHTML(d.desc(c.u))}</div>${badge}</div>`;
 }
-function updPCards(){$('#pcards').innerHTML=S.combat.cards.map(pcardHTML).join('')}
+function updPCards(){
+  const a=document.activeElement,f=a&&a.closest&&a.closest('#pcards')?a.dataset.ci:null;
+  $('#pcards').innerHTML=S.combat.cards.map(pcardHTML).join('');
+  if(f!=null){const el=$(`#pcards [data-ci="${f}"]`);if(el)el.focus({preventScroll:true})}
+}
 function updPlayer(){
   const C=S.combat;
   $('#p-name').innerHTML=`${CL[S.cls].n} <small>Lv${S.level}</small>`;
@@ -1386,6 +1464,8 @@ function updPlayer(){
 }
 function updActs(){
   const C=S.combat,dis=UI.busy||C.phase!=='player',cl=CL[S.cls];let sk='';
+  const sd=C.dice.find(d=>d.id===UI.sel);
+  $('#tray').setAttribute('aria-label',C.dice.length?`내 주사위: ${C.dice.map((d,i)=>`${i+1}번 ${d.v}${d.fr?'(빙결)':''}${d.burn?'(화상)':''}`).join(', ')}${sd?`. 선택됨: ${sd.v}`:''}. 숫자키로 고르고, Tab으로 장비를 골라 Enter로 넣으세요.`:'남은 주사위 없음');
   if(S.cls==='warrior'||S.cls==='gambler')
     sk=`<button class="btn alt ${UI.mode?'on':''}" data-a="skill" data-tip="${esc(cl.skd)}" ${dis||C.sk<=0?'disabled':''}>${cl.ski} ${cl.sk} <small>(${C.sk})</small></button>`;
   else if(S.cls==='mage'){const n=C.cards.filter(c=>c.sp).length;
@@ -1477,12 +1557,15 @@ function renderReward(){
 }
 
 // ---------- 모달 & 장비 선택 ----------
+let modalReturn=null;
 function modal(html,bind){
-  const m=$('#modal');m.innerHTML=`<div class="mbox">${html}</div>`;m.classList.add('show');
+  const m=$('#modal');if(!m.classList.contains('show'))modalReturn=document.activeElement;
+  m.innerHTML=`<div class="mbox" role="dialog" aria-modal="true">${html}</div>`;m.classList.add('show');
   const box=m.firstChild;box.addEventListener('click',e=>{if(e.target.closest('[data-a="close"]'))closeModal()});
   if(bind)bind(box);
+  const f=box.querySelector('button:not([disabled]),[data-k]');if(f)f.focus({preventScroll:true});
 }
-function closeModal(){const m=$('#modal');m.classList.remove('show');m.innerHTML='';hideTip()}
+function closeModal(){const m=$('#modal');m.classList.remove('show');m.innerHTML='';hideTip();if(modalReturn&&modalReturn.isConnected)modalReturn.focus({preventScroll:true});modalReturn=null}
 function confirmBox(msg,yes){
   modal(`<h2>확인</h2><p>${msg}</p><div class="row"><button class="btn red" data-a="yes">예</button><button class="btn alt" data-a="close">아니오</button></div>`,
     box=>box.querySelector('[data-a="yes"]').onclick=()=>{closeModal();yes()});
@@ -1490,7 +1573,7 @@ function confirmBox(msg,yes){
 function allItems(){return[...S.eq.map((it,i)=>({it,l:'eq',i})),...S.bag.map((it,i)=>({it,l:'bag',i}))]}
 const upgradable=()=>allItems().filter(r=>!r.it.u);
 function pickItem(title,list,label,onPick){
-  modal(`<h2>${title}</h2>${list.length?`<div class="pickgrid">${list.map((r,k)=>itemCardHTML(r.it,`<div class="arrow">${label(r)}</div>`,`data-k="${k}"`)).join('')}</div>`:'<p>대상 장비가 없습니다.</p>'}
+  modal(`<h2>${title}</h2>${list.length?`<div class="pickgrid">${list.map((r,k)=>itemCardHTML(r.it,`<div class="arrow">${label(r)}</div>`,`data-k="${k}" tabindex="0" role="button"`)).join('')}</div>`:'<p>대상 장비가 없습니다.</p>'}
     <div class="row"><button class="btn alt" data-a="close">취소</button></div>`,
     box=>box.addEventListener('click',e=>{const c=e.target.closest('[data-k]');if(c){closeModal();onPick(list[+c.dataset.k])}}));
 }
@@ -1530,18 +1613,40 @@ function openHelp(){
   <h3>🗺️ 던전</h3><ul><li>${Object.values(NODE).map(n=>n.i+' '+n.n).join(' · ')}</li>
    <li>승리하면 골드·경험치와 장비 보상을 얻습니다. 레벨 3과 6에 주사위가 늘어나고, 대장간·상점에서 장비를 <b>강화(+)</b>해 조건을 완화하거나 효과를 키울 수 있습니다.</li>
    <li>진행 상황(층, 장비, 가방, 골드, 체력, 전투 상태)은 행동할 때마다 브라우저에 자동 저장됩니다.</li></ul>
-  <h3>⌨️ 단축키</h3><p>1~9 주사위 선택 · E/Enter 턴 종료 · R 스킬 · Esc 선택 취소</p>
+  <h3>⌨️ 키보드</h3><p>1~9 주사위 선택 · Tab으로 장비 카드·맵 노드 이동 후 Enter/Space로 실행 · E 턴 종료 · R 스킬 · Esc 선택 취소<br>메뉴의 📊 전투 기록에서 보스별 승률·평균 턴을 볼 수 있습니다(이 브라우저에만 저장).</p>
   <div class="row"><button class="btn" data-a="close">알겠어요!</button></div>`);
+}
+function openStats(){
+  const l=getLog(),pct=(a,b)=>b?Math.round(a/b*100)+'%':'-',avg=(r,f)=>r.length?r.reduce((s,x)=>s+f(x),0)/r.length:null;
+  const rows=FL.map((f,i)=>{
+    const r=l.filter(x=>x.en===f.boss),w=r.filter(x=>x.won).length,t=avg(r,x=>x.turns),h=avg(r,x=>(x.hp0-x.hp1)/x.maxhp);
+    return`<tr><td>${i+1}층</td><td>${EN[f.boss].i} ${EN[f.boss].n}</td><td>${r.length}</td><td>${r.length?`${w} (${pct(w,r.length)})`:'-'}</td><td>${t==null?'-':t.toFixed(1)}</td><td>${h==null?'-':Math.round(h*100)+'%'}</td></tr>`}).join('');
+  const recent=l.slice(-12).reverse().map(x=>`<tr><td>${new Date(x.t).toLocaleDateString()}</td><td>${CL[x.cls]?CL[x.cls].i:''} Lv${x.lv}</td><td>${x.floor}층</td><td>${EN[x.en]?EN[x.en].i+' '+EN[x.en].n:x.en}${x.kind==='boss'?' 👑':x.kind==='elite'?' ★':''}</td><td>${x.turns}턴</td><td>❤️ ${x.hp0}→${x.hp1}</td><td>${x.won?'승리':'패배'}</td></tr>`).join('');
+  modal(`<h2>📊 전투 기록</h2><p>이 브라우저에만 저장되는 최근 전투 ${l.length}회의 기록입니다(외부로 전송하지 않음). 보스 난이도를 조정할 때 참고 자료로 씁니다.</p>
+    <h3>보스별 통계</h3><div class="tblwrap"><table class="tbl"><tr><th>층</th><th>보스</th><th>도전</th><th>승리</th><th>평균 턴</th><th>평균 체력 손실</th></tr>${rows}</table></div>
+    <h3>최근 전투</h3>${recent?`<div class="tblwrap"><table class="tbl">${recent}</table></div>`:'<p>아직 기록이 없습니다.</p>'}
+    <div id="logdump"></div>
+    <div class="row"><button class="btn alt" data-a="copy" ${l.length?'':'disabled'}>📋 JSON 복사</button><button class="btn red" data-a="wipe" ${l.length?'':'disabled'}>기록 지우기</button><button class="btn" data-a="close">닫기</button></div>`,
+    box=>box.addEventListener('click',e=>{
+      const a=e.target.closest('[data-a]');if(!a||a.disabled)return;
+      if(a.dataset.a==='copy'){
+        const txt=JSON.stringify(l);
+        const show=()=>{$('#logdump').innerHTML='<p>아래 내용을 직접 복사하세요.</p><textarea readonly style="width:100%;height:120px"></textarea>';const ta=$('#logdump textarea');ta.value=txt;ta.select()};
+        if(navigator.clipboard)navigator.clipboard.writeText(txt).then(()=>toast('📋 기록을 클립보드에 복사했습니다.'),show);else show();
+      }else if(a.dataset.a==='wipe')confirmBox('전투 기록을 모두 지울까요?',()=>{try{localStorage.removeItem(LOGKEY)}catch(e){}toast('기록을 지웠습니다.')});
+    }));
 }
 function openMenu(){
   modal(`<h2>☰ 메뉴</h2><div class="t-btns" style="margin:0 auto;max-width:340px">
     <button class="btn alt" data-a="help">📜 게임 방법</button>
+    <button class="btn alt" data-a="stats">📊 전투 기록</button>
     <button class="btn alt" data-a="title">🏠 타이틀로 (진행은 자동 저장됨)</button>
     <button class="btn red" data-a="quit">🏳️ 모험 포기</button>
     <button class="btn" data-a="close">닫기</button></div>`,
     box=>box.addEventListener('click',e=>{
       const a=(e.target.closest('[data-a]')||{}).dataset;if(!a)return;
       if(a.a==='help')openHelp();
+      else if(a.a==='stats')openStats();
       else if(a.a==='title'){closeModal();save();S=null;VIEW='title';UI.busy=false;FX.ghost=null;render()}
       else if(a.a==='quit')confirmBox('정말 이번 모험을 포기할까요? 저장된 진행이 삭제됩니다.',()=>{S.combat=null;S.screen='gameover';S.dead=1;recordBest(false);wipeSave();UI.busy=false;SFX.defeat();render()});
     }));
@@ -1762,10 +1867,20 @@ function init(){
   });
   document.addEventListener('mousemove',posTip);
   document.addEventListener('keydown',e=>{
-    if($('#modal').classList.contains('show')){if(e.key==='Escape')closeModal();return}
+    const k=e.key.toLowerCase(),a=document.activeElement;
+    if($('#modal').classList.contains('show')){
+      if(k==='escape')closeModal();
+      else if((k==='enter'||k===' ')&&a&&a.matches&&a.matches('#modal [data-k]')){e.preventDefault();a.click()}
+      return;
+    }
+    // 포커스된 장비 카드·맵 노드는 Enter/Space로 실행 (키보드 조작)
+    if((k==='enter'||k===' ')&&a&&a.matches&&a.matches('#pcards .card[data-ci],.node.avail')){
+      e.preventDefault();
+      if(a.classList.contains('node'))enterNode(+a.dataset.r,+a.dataset.i);else a.click();
+      return;
+    }
     const C=S&&S.screen==='combat'&&S.combat;if(!C)return;
-    const k=e.key.toLowerCase();
-    if(k==='e'||k==='enter'){e.preventDefault();endTurn()}
+    if(k==='e'||(k==='enter'&&(!a||a===document.body))){e.preventDefault();endTurn()}
     else if(k==='escape'){UI.sel=null;UI.mode=null;render()}
     else if(k==='r'||k==='q')useSkill();
     else if(/^[1-9]$/.test(k)&&!UI.busy&&C.phase==='player'){
@@ -1775,6 +1890,12 @@ function init(){
   });
   render();
   requestAnimationFrame(loop);
+  // rAF가 멈춘 경우(비활성 탭, 가려진 창)에도 굴림 연출이 끝나 턴이 진행되도록 타이머로 대신 진행
+  setInterval(()=>{
+    const now=performance.now(),gap=now-_last;if(gap<300)return;_last=now;
+    let t=Math.min(gap/1000,3)*SET.speed;
+    try{while(t>0){const dt=Math.min(.05,t);Tray.step(dt);FX.step(dt);t-=dt}}catch(e){console.error(e)}
+  },250);
 }
 init();
 </script>
