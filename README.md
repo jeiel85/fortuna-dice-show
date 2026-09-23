@@ -12,7 +12,7 @@
 ![Web Audio](https://img.shields.io/badge/Web%20Audio-synth%20SFX-1DB954)
 ![No Assets](https://img.shields.io/badge/external%20assets-0-success)
 ![No Build](https://img.shields.io/badge/build-none-lightgrey)
-[![Smoke test](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml/badge.svg)](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml)
+[![Tests](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml/badge.svg)](https://github.com/jeiel85/fortuna-dice-show/actions/workflows/smoke.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ### [▶ 바로 플레이하기 (라이브 데모)](https://jeiel85.github.io/fortuna-dice-show/)
@@ -148,6 +148,7 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 ## 🛠️ 기술 메모
 
 - **단일 파일**: HTML, CSS, JS가 `index.html` 하나에 들어 있습니다. 외부 스크립트, 폰트, 이미지, 오디오가 없습니다.
+- **엔진 / UI 분리**: 게임 규칙(데이터·전투·턴 진행·보상·맵 생성·세이브 검증)은 `<script id="engine">` 블록에만 있고, DOM·오디오·타이머·저장소를 건드리지 않습니다. 연출이 필요한 결과는 `emit()` 이벤트(`hurt`, `block`, `status`, `dieAdded` 등)로 알리고, 아래 UI 블록이 이를 구독해 소리·숫자·파티클로 바꿉니다. 난수는 `setRng()`로 교체할 수 있어 시드를 고정해 재현할 수 있습니다.
 - **3D 주사위**: 정육면체 6면을 쿼터니언으로 회전시키고 원근 투영해 Canvas 2D로 그립니다. 굴림이 끝나면 목표 눈의 면이 정면을 향하도록 `slerp`로 정착시킵니다. 마주보는 면의 합은 7입니다.
 - **트레이 물리**: 속도 감쇠, 벽 반사, 주사위끼리의 원형 충돌. 충돌 강도에 맞춰 달그락 소리가 납니다.
 - **적 AI**: 굴린 주사위를 조건이 까다로운 장비부터 백트래킹으로 채워 예고를 만듭니다.
@@ -158,26 +159,37 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 
 ## 🧪 테스트
 
+**엔진 단위 테스트** (브라우저 불필요, 1초 이내):
+
+```bash
+node --test tests/engine.test.mjs
+```
+
+`index.html`에서 엔진 블록만 떼어 Node `vm`에서 시드 고정 난수로 실행합니다. 피해 계산(방어·관통·회피·가시·힘·약화), 적 예고에 거는 상태이상, 적 AI 배치 순서, 주사위 배치(여러 칸·같은 눈·카운트다운·도구), 턴 시작 처리, 적 턴 중간 저장 후 이어가기, 스킬, 보상·레벨 업, 맵 생성 규칙(시드 60개), 세이브 검증을 확인합니다. 엔진 블록이 브라우저 API를 참조하지 않는지도 검사합니다.
+
+**스모크 테스트** (Node 22 이상, Chrome·Chromium·Edge 필요):
+
 ```bash
 node tests/smoke.mjs
 ```
 
-Node 22 이상과 Chrome(또는 Chromium, Edge)이 필요합니다. 헤드리스 Chrome으로 게임을 띄워 다음을 확인합니다.
+헤드리스 Chrome으로 실제 게임을 띄워 다음을 확인합니다.
 
 1. 주사위 조건, 적 AI 배치, 3D 주사위 정면 눈 방향 같은 핵심 규칙
 2. 전투 중 저장·복구, 손상되거나 호환되지 않는 세이브 처리
 3. 최종 보스 격파 → 승리 화면, 세이브 삭제, 기록 반영
 4. 4개 클래스 자동 플레이(탐욕 봇)로 전체 흐름을 돌리며 런타임 에러와 진행 멈춤 감지
 
-`SMOKE_BUDGET_S`(클래스당 시간 예산, 초)와 `SMOKE_CLASSES`(예: `gambler,gambler,gambler`)로 조정할 수 있습니다. `main` 푸시와 PR마다 GitHub Actions에서 실행됩니다.
+`SMOKE_BUDGET_S`(클래스당 시간 예산, 초)와 `SMOKE_CLASSES`(예: `gambler,gambler,gambler`)로 조정할 수 있습니다. 두 테스트 모두 `main` 푸시와 PR마다 GitHub Actions에서 실행됩니다.
 
 ## 📂 구조
 
 ```
 fortuna-dice-show/
-├── index.html              # 게임 전체 (약 1,900줄)
+├── index.html              # 게임 전체 (엔진 블록 + UI 블록, 약 2,000줄)
+├── tests/engine.test.mjs   # 엔진 단위 테스트 (Node, 브라우저 불필요)
 ├── tests/smoke.mjs         # 헤드리스 Chrome 스모크 테스트
-├── .github/workflows/      # CI (스모크 테스트)
+├── .github/workflows/      # CI (단위 + 스모크 테스트)
 ├── docs/                   # README 스크린샷
 ├── LICENSE
 └── README.md

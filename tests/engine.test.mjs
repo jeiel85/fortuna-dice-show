@@ -1,0 +1,273 @@
+// 엔진 단위 테스트: index.html의 <script id="engine"> 블록만 떼어 Node vm에서 실행한다.
+// 실행: node --test tests/engine.test.mjs   (브라우저 불필요)
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { readFileSync } from 'node:fs';
+
+const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+const SRC = html.match(/<script id="engine">([\s\S]*?)<\/script>/)[1];
+
+// 새 엔진 인스턴스 (DOM·타이머 없는 빈 전역에서 실행)
+function boot(seed = 1) {
+  const ctx = vm.createContext({});
+  vm.runInContext(SRC, ctx, { filename: 'engine.js' });
+  const ev = code => vm.runInContext(code, ctx);
+  ev(`var __events=[];setRng(seededRng(${seed}));onEvent((t,p)=>__events.push({t,...p}))`);
+  return {
+    ev,
+    json: code => JSON.parse(ev(`JSON.stringify(${code})`)),
+    events: type => JSON.parse(ev(`JSON.stringify(__events)`)).filter(e => !type || e.t === type),
+    clearEvents: () => ev('__events.length=0'),
+    // 다음 주사위 눈을 지정한다 (d6 한 번 = rng 한 번)
+    dice: (...vals) => ev(`{const q=${JSON.stringify(vals.map(v => (v - .5) / 6))};let i=0;setRng(()=>i<q.length?q[i++]:.5)}`),
+  };
+}
+// 런 + 전투를 만들고 플레이어 턴 상태로 둔다 (주사위는 테스트가 직접 넣음)
+function fight(E, { cls = 'warrior', enemy = 'skel', kind = 'normal', eq, level = 1, dice = [] } = {}) {
+  E.ev(`S=createRun('${cls}',0);S.level=${level};${eq ? `S.eq=${JSON.stringify(eq.map(id => ({ id: id.replace('+', ''), u: id.endsWith('+') ? 1 : 0 })))};` : ''}
+    createCombat('${kind}','${enemy}');S.combat.phase='player';
+    S.combat.dice=${JSON.stringify(dice.map((v, i) => ({ id: 100 + i, v })))};S.combat.nid=200;`);
+  E.clearEvents();
+}
+const ci = (E, id) => E.ev(`S.combat.cards.findIndex(c=>c.id==='${id}')`);
+
+test('엔진 블록은 브라우저·UI에 의존하지 않는다', () => {
+  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const banned = code.match(/\b(document|window|localStorage|sessionStorage|setTimeout|setInterval|requestAnimationFrame|fetch|navigator|AudioContext|SFX|Tray|FX|UI|render|floatAt|announce|toast)\b|Math\.random\(/g);
+  assert.equal(banned, null, `금지된 참조: ${banned}`);
+});
+
+test('주사위 조건 · 묶음 판정 · 적 AI 채우기', () => {
+  const E = boot();
+  assert.equal(E.ev(`condOk(ODD,3)&&!condOk(ODD,4)&&condOk(EVEN,6)&&condOk(MX(3),3)&&!condOk(MX(3),4)&&condOk(MN(5),6)&&condOk(EQ(6),6)&&!condOk(EQ(6),5)&&condOk(RG(3,4),4)&&!condOk(RG(3,4),5)`), true);
+  assert.equal(E.ev('groupFits([A,SAME],[4,4])'), true);
+  assert.equal(E.ev('groupFits([A,SAME],[4,5])'), false);
+  assert.equal(E.ev('groupFits([EVEN,EVEN],[6,2])'), true);
+  assert.equal(E.ev('groupFits([EVEN,EVEN],[6,3])'), false);
+  assert.deepEqual(E.json('fillGroup([MN(5)],[{v:6},{v:3}]).map(d=>d.v)'), [6]);
+  assert.equal(E.ev('fillGroup([EQ(1)],[{v:6}])'), null);
+  assert.deepEqual(E.json('fillGroup([A,SAME],[{v:6},{v:3},{v:3}]).map(d=>d.v)'), [3, 3]);
+});
+
+test('피해: 방어·관통·회피·가시·힘·약화', () => {
+  const E = boot();
+  fight(E);
+  E.ev('S.combat.E.hp=30;S.combat.E.block=5;dealDmg("p","e",8,{})');
+  assert.deepEqual(E.json('[S.combat.E.hp,S.combat.E.block]'), [27, 0]);
+  assert.deepEqual(E.events().map(e => e.t), ['attack', 'blocked', 'hurt']);
+  E.ev('S.combat.E.block=5;dealDmg("p","e",8,{pierce:true})');
+  assert.deepEqual(E.json('[S.combat.E.hp,S.combat.E.block]'), [19, 5], '관통은 방어를 무시');
+  E.ev('S.combat.E.st.dodge=1;dealDmg("p","e",50,{})');
+  assert.deepEqual(E.json('[S.combat.E.hp,S.combat.E.st.dodge]'), [19, 0], '회피는 공격 1회를 무효화');
+  E.ev('S.combat.E.block=0;S.combat.E.st.thorns=2;S.hp=40;dealDmg("p","e",1,{})');
+  assert.equal(E.ev('S.hp'), 38, '가시는 공격자에게 반사');
+  E.ev('S.combat.E.st.thorns=0;S.combat.E.hp=30;S.combat.pst.str=2;S.combat.pst.weak=1;dealDmg("p","e",8,{})');
+  assert.equal(E.ev('S.combat.E.hp'), 25, '(8+힘2)/2 = 5');
+});
+
+test('적에게 거는 빙결·감전·화상은 예고에 즉시 적용', () => {
+  const E = boot();
+  fight(E, { enemy: 'ogre' });
+  const gs = 0; // ogre: 대검(최소 5), 탑 방패, 물기+
+  E.ev(`S.combat.E.cards[${gs}].intent=[[{id:'e1',v:6}]];S.combat.E.cards[2].intent=[[{id:'e2',v:3}]]`);
+  E.ev('addStatus("e","freeze",1)');
+  assert.equal(E.ev(`S.combat.E.cards[${gs}].intent`), null, '6이 1이 되어 "최소 5" 조건이 깨지면 행동 무산');
+  assert.equal(E.events('fizzle').length, 1);
+  E.ev('addStatus("e","burn",1)');
+  assert.equal(E.ev('S.combat.E.cards[2].intent[0][0].burn'), 1);
+  E.ev('addStatus("e","shock",1)');
+  assert.deepEqual(E.json('[S.combat.E.cards[2].intent,S.combat.E.cards[2].off]'), [null, 1]);
+});
+
+test('적 AI는 조건이 까다로운 장비부터 채운다', () => {
+  const E = boot();
+  fight(E);
+  // '아무 눈' 장비가 앞에 있어도 6은 '최소 5' 대검에 가야 둘 다 쓸 수 있다
+  E.ev(`S.combat.E.cards=[mkCard('sword',0),mkCard('greatsword',0)];S.combat.E.dice=2`);
+  E.dice(6, 2);
+  E.ev('planIntents()');
+  assert.deepEqual(E.json('S.combat.E.cards.map(c=>c.intent&&c.intent[0].map(d=>d.v))'), [[2], [6]]);
+  // 포르투나의 변덕: 주사위 하나는 반드시 6
+  fight(E, { enemy: 'fortuna', kind: 'boss' });
+  E.dice(1, 1, 1, 1, 1);
+  E.ev('planIntents()');
+  assert.ok(E.json('S.combat.eroll.map(d=>d.v)').includes(6));
+});
+
+test('주사위 배치: 단일·여러 칸·같은 눈·카운트다운·화상·도구', () => {
+  const E = boot();
+  fight(E, { eq: ['greatsword', 'hammer', 'twin', 'ram', 'flip'], dice: [5, 4, 2, 6, 6, 1, 4, 4], enemy: 'ogre' });
+  E.ev('S.combat.E.hp=200');
+  // 대검(최소 5): 5+4
+  assert.equal(E.ev(`putDie(${ci(E, 'greatsword')},100).ok`), true);
+  assert.equal(E.ev('S.combat.E.hp'), 191);
+  assert.equal(E.ev(`canPlace(${ci(E, 'greatsword')},6)`), -1, '턴당 1회');
+  // 짝수 해머: 첫 칸만 채우면 대기, 두 칸이 차면 발동 (4+2+1)
+  E.ev(`putDie(${ci(E, 'hammer')},101)`);
+  assert.equal(E.ev('S.combat.E.hp'), 191);
+  E.ev(`putDie(${ci(E, 'hammer')},102)`);
+  assert.equal(E.ev('S.combat.E.hp'), 184);
+  // 쌍검: 같은 눈만 두 번째 칸에 들어간다 (4×3)
+  E.ev(`putDie(${ci(E, 'twin')},106)`);
+  assert.equal(E.ev(`canPlace(${ci(E, 'twin')},5)`), -1);
+  E.ev(`putDie(${ci(E, 'twin')},107)`);
+  assert.equal(E.ev('S.combat.E.hp'), 172);
+  // 파성추 카운트다운 12: 6 → 남음 6, 6 → 발동(16) 후 12로 리셋
+  E.ev(`putDie(${ci(E, 'ram')},103)`);
+  assert.equal(E.ev(`S.combat.cards[${ci(E, 'ram')}].cd`), 6);
+  E.ev(`putDie(${ci(E, 'ram')},104)`);
+  assert.deepEqual(E.json(`[S.combat.E.hp,S.combat.cards[${ci(E, 'ram')}].cd]`), [156, 12]);
+  // 뒤집개: 1 → 새 주사위 6
+  E.clearEvents();
+  E.ev(`S.combat.dice.find(d=>d.id===105).burn=1;S.hp=50;putDie(${ci(E, 'flip')},105)`);
+  assert.equal(E.ev('S.hp'), 48, '불탄 주사위는 체력 2');
+  assert.deepEqual(E.events('dieAdded').map(e => e.die.v), [6]);
+});
+
+test('여러 칸 장비의 주사위 되돌리기 · 도적 충전', () => {
+  const E = boot();
+  fight(E, { cls: 'thief', eq: ['hammer'], dice: [4, 6] });
+  E.ev('putDie(0,100)');
+  assert.equal(E.ev('S.combat.steal'), 4);
+  assert.deepEqual(E.json('takeBack(0,0)'), { id: 100, v: 4 });
+  assert.deepEqual(E.json('S.combat.dice.map(d=>d.v).sort()'), [4, 6]);
+});
+
+test('턴 시작: 독·방어 초기화·빙결·감전·주사위 수·보스 분노', () => {
+  const E = boot();
+  fight(E, { enemy: 'dealer', kind: 'boss' });
+  E.ev('S.hp=40;S.combat.pb=9;S.combat.pst={poison:3,freeze:2,shock:1};S.combat.E.hp=20');
+  E.dice(6, 6, 6, 5, 4, 3); // 적 3개 + 내 3개
+  E.ev('beginPlayerTurn()');
+  assert.deepEqual(E.json('[S.hp,S.combat.pb,S.combat.pst.poison]'), [37, 0, 2]);
+  assert.deepEqual(E.json('S.combat.dice.map(d=>d.v)'), [1, 1, 3], '가장 높은 2개가 1로');
+  assert.equal(E.ev('S.combat.cards.filter(c=>c.off).length'), 1);
+  assert.equal(E.ev('S.combat.E.st.str'), 1, '체력 절반 이하 보스는 분노');
+  assert.equal(E.events('enrage').length, 1);
+  for (const [cls, lv, n] of [['warrior', 1, 3], ['warrior', 3, 4], ['warrior', 6, 5], ['gambler', 1, 4]]) {
+    fight(E, { cls, level: lv });
+    E.ev('beginPlayerTurn()');
+    assert.equal(E.ev('S.combat.dice.length'), n, `${cls} Lv${lv}`);
+  }
+  // 독으로 쓰러지면 굴리지 않고 끝난다
+  fight(E);
+  E.ev('S.hp=2;S.combat.phase="start";S.combat.pst.poison=5;beginPlayerTurn()');
+  assert.deepEqual(E.json('[outcome(),S.combat.phase,S.combat.dice.length]'), ['lose', 'start', 0]);
+});
+
+test('적 턴: 여러 번 쓰는 장비도 새로고침 후 중복 실행하지 않는다', () => {
+  // 한 번에 끝까지
+  const A = boot(7);
+  fight(A, { enemy: 'rat' }); // 할퀴기(최대 3, 턴당 2회, 피해 눈+1)
+  A.dice(2, 3);
+  A.ev('planIntents();S.hp=50;endPlayerTurn();enemyTurnBegin();for(let i=0;i<20&&nextEnemyAction();i++)enemyAct();enemyTurnEnd()');
+  assert.equal(A.ev('S.hp'), 50 - (3 + 1) - (2 + 1));
+  assert.equal(A.ev('S.combat.turn'), 2);
+  // 첫 행동 직후 저장 → 새 엔진에서 불러와 이어가기
+  const B = boot(7);
+  fight(B, { enemy: 'rat' });
+  B.dice(2, 3);
+  B.ev('planIntents();S.hp=50;endPlayerTurn();enemyTurnBegin();enemyAct()');
+  const saved = B.ev('JSON.stringify(S)');
+  const C = boot(99);
+  C.ev(`S=parseSave(${JSON.stringify(saved)}).s;for(let i=0;i<20&&nextEnemyAction();i++)enemyAct();enemyTurnEnd()`);
+  assert.equal(C.ev('S.hp'), 43);
+});
+
+test('스킬: 훔치기·재굴림·페이지 넘기기', () => {
+  const E = boot();
+  fight(E, { cls: 'thief', enemy: 'ogre' });
+  assert.equal(E.json('stealCard()').reason, 'charge');
+  E.ev('S.combat.steal=10');
+  const r = E.json('stealCard()');
+  assert.equal(r.ok, true);
+  assert.equal(E.ev(`S.combat.cards[${r.ci}].temp`), 1);
+  assert.equal(E.ev('S.combat.E.cards.filter(c=>c.stolen).length'), 1);
+  E.ev('S.combat.steal=10;stealCard();S.combat.steal=10');
+  assert.equal(E.json('stealCard()').reason, 'none', '적의 마지막 장비는 못 훔친다');
+
+  fight(E, { dice: [2] });
+  E.ev('S.combat.sk=1');
+  assert.ok(E.json('rerollDie(100)'));
+  assert.equal(E.ev('rerollDie(100)'), null, '횟수 소진');
+
+  fight(E, { cls: 'mage' }); // 주문 3개(화염구·얼음 창·치유) 중 2개만 펼침
+  E.ev('beginPlayerTurn()');
+  assert.equal(E.ev('S.combat.hand.length'), 2);
+  assert.equal(E.ev('flipPage()'), true);
+  assert.equal(E.ev('S.combat.sk'), 0);
+  assert.equal(E.ev('flipPage()'), false);
+});
+
+test('승리 보상 · 레벨 업 · 최종 보스', () => {
+  const E = boot();
+  fight(E);
+  E.ev('S.xp=1;S.hp=30;S.gold=0');
+  const r = E.json('resolveVictory()');
+  assert.equal(r.last, false);
+  assert.deepEqual(E.json('[S.screen,S.level,S.maxhp,S.hp,S.st.kills,S.combat]'), ['reward', 2, 65, 40, 1, null]);
+  assert.ok(E.ev('S.gold') > 0);
+  assert.equal(E.ev('S.ctx.items.length'), 3);
+  assert.equal(E.ev('S.ctx.items.every(it=>!IT[it.id].mon)'), true);
+
+  fight(E, { enemy: 'fortuna', kind: 'boss' });
+  E.ev('S.floor=6');
+  assert.equal(E.json('resolveVictory()').last, true);
+  assert.deepEqual(E.json('[S.screen,S.dead,S.ctx.items.length]'), ['victory', 1, 0]);
+});
+
+test('던전 맵 생성 규칙 (시드 60개)', () => {
+  for (let seed = 1; seed <= 60; seed++) {
+    const E = boot(seed);
+    const m = E.json('genMap()');
+    assert.equal(m.length, 7);
+    assert.deepEqual(m[6].map(n => n.t), ['boss']);
+    assert.ok(m[0].every(n => n.t === 'fight'), '첫 줄은 전투');
+    assert.ok(m[5].every(n => n.t === 'apple' || n.t === 'forge') && m[5].some(n => n.t === 'apple'), '보스 직전은 휴식');
+    assert.ok(m.slice(2, 5).flat().some(n => n.t === 'shop'), '2~4줄에 상점');
+    for (let r = 0; r < 6; r++) {
+      assert.ok(m[r].every(n => n.l.length && n.l.every(j => j >= 0 && j < m[r + 1].length)), `${seed}: ${r}줄 연결`);
+      m[r + 1].forEach((_, j) => assert.ok(m[r].some(n => n.l.includes(j)), `${seed}: ${r + 1}줄 ${j}번 도달 불가`));
+    }
+  }
+});
+
+test('장비 드롭: 몬스터 전용 제외 · 최소 희귀도 · 전설 보장', () => {
+  const E = boot(3);
+  E.ev(`S=createRun('warrior',0)`);
+  for (let i = 0; i < 30; i++) {
+    const it = E.json('rollItems(3,2,true).map(x=>IT[x.id])');
+    assert.equal(it[0].rar, 3);
+    assert.ok(it.every(d => d.rar >= 2 && !d.mon));
+  }
+});
+
+test('미리보기는 상태를 바꾸지 않는다', () => {
+  const E = boot();
+  fight(E, { enemy: 'ogre' });
+  const before = E.ev('JSON.stringify(S)');
+  E.ev('preview("e",S.combat.E.cards[0],[6]);preview("p",S.combat.cards[0],[3])');
+  assert.equal(E.ev('JSON.stringify(S)'), before);
+  assert.equal(E.events().length, 0);
+  assert.equal(E.ev('preview("e",S.combat.E.cards[0],[6]).dmg'), 10);
+});
+
+test('세이브: 왕복 · 손상 거부 · 복구', () => {
+  const E = boot();
+  fight(E);
+  const good = E.ev('JSON.stringify(S)');
+  assert.equal(E.ev(`JSON.stringify(parseSave(${JSON.stringify(good)}).s)`), good);
+  const p = raw => E.json(`parseSave(${JSON.stringify(raw)})`);
+  assert.equal(p('{깨진').s, null);
+  const mut = f => { const o = JSON.parse(good); f(o); return JSON.stringify(o) };
+  assert.equal(p(mut(o => o.v = 99)).s, null, '알 수 없는 버전');
+  assert.equal(p(mut(o => o.eq = [{ id: 'nope', u: 0 }])).s, null, '없는 장비');
+  assert.equal(p(mut(o => o.floor = 9)).s, null, '범위 밖 층');
+  const bc = p(mut(o => o.combat.cards[0].id = 'nope'));
+  assert.deepEqual([bc.s.screen, bc.s.combat, !!bc.note], ['map', null, true], '손상된 전투는 맵으로');
+  const br = p(mut(o => { o.combat = null; o.screen = 'reward'; o.ctx = { items: 'x' } }));
+  assert.equal(br.s.screen, 'map', '손상된 방은 맵으로');
+  const bb = p(mut(o => { o.combat = null; o.screen = 'map'; o.pos = { r: 6, i: 0 } }));
+  assert.deepEqual([bb.s.screen, bb.s.floor, bb.s.pos], ['floor', 2, null], '보스방 직후면 다음 층');
+});
