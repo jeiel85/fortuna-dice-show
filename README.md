@@ -12,6 +12,7 @@
 ![Web Audio](https://img.shields.io/badge/Web%20Audio-synth%20SFX-1DB954)
 ![No Assets](https://img.shields.io/badge/external%20assets-0-success)
 ![No Build](https://img.shields.io/badge/build-none-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ### [▶ 바로 플레이하기 (라이브 데모)](https://jeiel85.github.io/fortuna-dice-show/)
 
@@ -152,8 +153,13 @@ git clone https://github.com/jeiel85/fortuna-dice-show.git
 fortuna-dice-show/
 ├── index.html   # 게임 전체 (약 1,800줄)
 ├── docs/        # README 스크린샷
+├── LICENSE
 └── README.md
 ```
+
+## 📜 라이선스
+
+[MIT License](LICENSE) © 2026 박용은 (jeiel85): 자유롭게 플레이하고, 고치고, 배포하세요.
 
 ---
 
