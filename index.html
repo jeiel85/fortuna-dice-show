@@ -35,6 +35,7 @@ body::before{content:"";position:fixed;inset:-20% 0 0 0;pointer-events:none;back
 @keyframes glow{50%{box-shadow:0 3px 0 #a86f12,0 0 22px #ffd54a}}
 #screen{position:relative;flex:1;min-height:0;overflow:auto}
 .card:focus-visible,.pickgrid .card:focus-visible{outline:3px solid #7ff;outline-offset:3px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .node:focus{outline:none}.node:focus-visible circle{stroke:#7ff;stroke-width:1.6}
 #fx{position:fixed;left:0;top:0;pointer-events:none;z-index:80}
 /* ---------- cards ---------- */
@@ -483,9 +484,12 @@ function skillMax(){
   return 0;
 }
 // 엔진은 결과만 이벤트로 알리고, 소리·숫자·파티클은 UI가 구독해서 처리한다.
+// 이벤트 이름은 여기에 등록된 것만 쓸 수 있다 (오타는 즉시 예외 → 테스트에서 잡힌다)
+const EVENTS=Object.freeze(['attack','dodge','blocked','hurt','zero','thorns','lose','block','heal','status','fizzle','gold','dieAdded','fire','tick','chain','enrage']);
+const EVENT_SET=new Set(EVENTS);
 let emitFn=()=>{};
 function onEvent(f){emitFn=f||(()=>{})}
-const emit=(type,p={})=>emitFn(type,p);
+function emit(type,p={}){if(!EVENT_SET.has(type))throw new Error('알 수 없는 엔진 이벤트: '+type);emitFn(type,p)}
 
 // =====================================================================
 //  런 생성 · 던전 맵
@@ -856,6 +860,104 @@ function resolveVictory(){
 function resolveDefeat(){S.combat=null;S.screen='gameover';S.dead=1}
 
 // =====================================================================
+//  장비 관리 · 강화 (ref = {it, l:'eq'|'bag', i})
+// =====================================================================
+function allItems(){return[...S.eq.map((it,i)=>({it,l:'eq',i})),...S.bag.map((it,i)=>({it,l:'bag',i}))]}
+const upgradable=()=>allItems().filter(r=>!r.it.u);
+// ref가 지금도 같은 장비를 가리키는지 (목록을 연 뒤 바뀌었을 수 있음)
+const refOk=r=>!!r&&(r.l==='eq'?S.eq:S.bag)[r.i]===r.it;
+function upgradeItem(r){if(!refOk(r)||r.it.u)return false;r.it.u=1;return true}
+function unequip(i){if(S.eq.length<=1||!S.eq[i])return false;S.bag.push(...S.eq.splice(i,1));return true}
+function equip(i){if(S.eq.length>=maxEq()||!S.bag[i])return false;S.eq.push(...S.bag.splice(i,1));return true}
+
+// =====================================================================
+//  방: 상점 · 보물 상자 · 사과나무 · 대장간 · 여신의 이벤트
+//  (UI는 화면만 그리고, 가능 여부 판단과 상태 변경은 모두 여기서 한다)
+// =====================================================================
+const price=it=>Math.round(({1:30,2:52,3:85}[IT[it.id].rar]+S.floor*3)*(it.u?1.4:1));
+const sellPrice=it=>Math.floor(price(it)*.4);
+const upPrice=()=>40+S.floor*6;
+const APPLE_COST=20,APPLE_HEAL=20;
+function openShop(){S.ctx={stock:rollItems(4,1).map(it=>({...it,sold:0})),apples:2,upg:1};S.screen='shop'}
+const canBuy=k=>{const it=S.ctx.stock[k];return !!it&&!it.sold&&S.gold>=price(it)};
+// 결과: {it, where} | null
+function buyItem(k){
+  if(!canBuy(k))return null;
+  const s=S.ctx.stock[k];S.gold-=price(s);s.sold=1;
+  const it={id:s.id,u:s.u};return{it,where:gainItem(it)};
+}
+const canBuyApple=()=>S.ctx.apples>0&&S.gold>=APPLE_COST&&S.hp<S.maxhp;
+function buyApple(){if(!canBuyApple())return false;S.gold-=APPLE_COST;S.ctx.apples--;S.hp=Math.min(S.maxhp,S.hp+APPLE_HEAL);return true}
+const canBuyUpgrade=()=>S.ctx.upg>0&&S.gold>=upPrice()&&upgradable().length>0;
+function buyUpgrade(r){if(!canBuyUpgrade())return false;const cost=upPrice();if(!upgradeItem(r))return false;S.gold-=cost;S.ctx.upg--;return true}
+// 마지막 장착 장비는 팔 수 없다
+const sellable=()=>allItems().filter(r=>r.l==='bag'||S.eq.length>1);
+function sellItem(r){
+  if(!refOk(r)||(r.l==='eq'&&S.eq.length<=1))return 0;
+  const g=sellPrice(r.it);S.gold+=g;(r.l==='eq'?S.eq:S.bag).splice(r.i,1);return g;
+}
+
+// 보물 상자: 2층부터 12% 확률로 미믹. 결과: {mimic:true, hp} | {mimic:false}
+function openTreasure(){
+  if(S.floor>=2&&rng()<.12)return{mimic:true,hp:16+S.floor*9};
+  S.ctx={opened:0,items:rollItems(2,S.floor>=3?2:1),gold:R(15,25)+S.floor*5};S.screen='treasure';
+  return{mimic:false};
+}
+function treasureOpen(){S.ctx.opened=1}
+function treasurePick(k){const x=S.ctx;if(!x.opened||!x.items[k])return null;const it=x.items[k];return{it,where:gainItem(it)}}
+function treasureGold(){const x=S.ctx;if(!x.opened)return 0;S.gold+=x.gold;S.st.gold+=x.gold;return x.gold}
+
+// 사과나무: 빨간 사과(최대 체력 35% 회복) 또는 황금 사과(최대 체력 +6, 체력 6 회복)
+const appleHeal=()=>Math.round(S.maxhp*.35);
+function eatApple(kind){
+  if(kind==='gold'){S.maxhp+=6;S.hp=Math.min(S.maxhp,S.hp+6);return 6}
+  const h=Math.min(appleHeal(),S.maxhp-S.hp);S.hp+=h;return h;
+}
+// 대장간: 무료 강화 1회 또는 휴식
+const FORGE_REST=12;
+function forgeUpgrade(r){if(S.ctx.done||!upgradeItem(r))return false;S.ctx.done=1;return true}
+function forgeRest(){const h=Math.min(FORGE_REST,S.maxhp-S.hp);S.hp+=h;return h}
+
+// 여신의 이벤트
+const WHEEL=[
+  {k:'gold',t:'🪙 +40',c:'#b8871c'},{k:'heal',t:'❤️ +25',c:'#2f9e6e'},{k:'item',t:'🎁 장비',c:'#6a3fb0'},{k:'none',t:'꽝!',c:'#444'},
+  {k:'upgrade',t:'🔨 강화',c:'#2d5fa8'},{k:'hurt',t:'💔 -10',c:'#a8283f'},{k:'maxhp',t:'❤️ 최대+5',c:'#c0622a'},{k:'halve',t:'🪙 반토막',c:'#5a2030'},
+];
+function openEvent(){S.ctx={type:pick(['roulette','duel','deal']),done:0};S.screen='event'}
+// 결과는 돌리는 순간 정해 저장한다 (연출 중 새로고침해도 다시 뽑을 수 없음)
+function spinWheel(){const x=S.ctx;if(x.res==null){x.res=R(0,WHEEL.length-1);x.applied=0}return x.res}
+// 결과 적용. 반환: {k, it?, where?, fallback?} | null(이미 적용됨)
+function applyWheel(){
+  const x=S.ctx;if(x.res==null||x.applied)return null;
+  x.applied=1;const w=WHEEL[x.res],out={k:w.k};
+  switch(w.k){
+    case 'gold':S.gold+=40;S.st.gold+=40;break;
+    case 'heal':S.hp=Math.min(S.maxhp,S.hp+25);break;
+    case 'item':{const it=rollItems(1,2)[0];out.it=it;out.where=gainItem(it);break}
+    case 'upgrade':if(upgradable().length)x.pendUp=1;else{S.gold+=25;out.fallback=25}break;
+    case 'hurt':S.hp=Math.max(1,S.hp-10);break;
+    case 'maxhp':S.maxhp+=5;S.hp+=5;break;
+    case 'halve':S.gold=Math.floor(S.gold/2);break;
+  }
+  return out;
+}
+function wheelUpgrade(r){if(!S.ctx.pendUp||!upgradeItem(r))return false;S.ctx.pendUp=0;return true}
+// 주사위 대결: 2개 합이 높은 쪽이 판돈을 가져간다
+const DUEL_BETS=[20,50];
+function duel(bet){
+  const x=S.ctx;if(x.done||!DUEL_BETS.includes(bet)||S.gold<bet)return null;
+  const p=[d6(),d6()],h=[d6(),d6()],win=Math.sign(p[0]+p[1]-h[0]-h[1]);
+  S.gold+=win*bet;if(win>0)S.st.gold+=bet;
+  x.duel={p,h,win,bet};x.done=1;return x.duel;
+}
+// 여신의 거래
+const DEAL_HP=12,DEAL_GOLD=40;
+const canDealBlood=()=>!S.ctx.done&&S.hp>DEAL_HP;
+const canDealCoin=()=>!S.ctx.done&&S.gold>=DEAL_GOLD&&upgradable().length>0;
+function dealBlood(){if(!canDealBlood())return null;S.hp-=DEAL_HP;const it=rollItems(1,2)[0];S.ctx.done=1;S.ctx.got=it;return{it,where:gainItem(it)}}
+function dealCoin(){if(!canDealCoin())return null;S.gold-=DEAL_GOLD;const r=pick(upgradable());r.it.u=1;S.ctx.done=1;S.ctx.upId=r.it.id;return r}
+
+// =====================================================================
 //  세이브 검증 · 복구
 // =====================================================================
 const num=v=>typeof v==='number'&&isFinite(v);
@@ -993,7 +1095,9 @@ const LINES={
   low:['위험해요! 벌써 쇼를 끝낼 건가요?','관객들이 숨을 죽이고 있어요…'],
   win:['브라보! 다음 무대로!','훌륭해요, 도전자! 박수~','여신의 총애가 당신에게!'],
 };
-const line=(k,e)=>pick(LINES[k]).replace('{e}',e||'');
+// 멘트·팁 같은 연출용 무작위는 엔진 난수(rng)를 쓰지 않는다 → 같은 시드면 게임 진행이 같다
+const uiPick=a=>a[Math.floor(Math.random()*a.length)];
+const line=(k,e)=>uiPick(LINES[k]).replace('{e}',e||'');
 
 // =====================================================================
 //  UI 상태 · 저장소 (LocalStorage 실시간 동기화)
@@ -1165,12 +1269,15 @@ const Tray={cv:null,g:null,W:0,H:0,dpr:1,list:[],s:56,wait:[],
   },
   draw(now){
     if(!this.cv)return;const g=this.g,s=this.s;
+    // 키보드 포커스가 주사위 버튼에 있으면 해당 주사위에 점선 고리 (포커스 이벤트 대신 현재 포커스를 직접 읽음)
+    const ae=document.activeElement,kf=ae&&ae.dataset&&ae.dataset.did!=null?+ae.dataset.did:null;
     g.setTransform(this.dpr,0,0,this.dpr,0,0);g.clearRect(0,0,this.W,this.H);
     for(const d of this.list){
       if(d.st==='drag'){g.save();g.globalAlpha=.4;g.setLineDash([5,5]);g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.arc(d.rx,d.ry,s*.45,0,Math.PI*2);g.stroke();g.restore();continue}
       g.save();g.globalAlpha=Math.max(0,d.a);
       g.fillStyle='rgba(0,0,0,.35)';g.beginPath();g.ellipse(d.x+s*.08,d.y+s*.38*d.sc,s*.42*d.sc,s*.13*d.sc,0,0,Math.PI*2);g.fill();
       const sel=d.id===UI.sel,mode=UI.mode&&d.col==='p'&&d.st==='rest';
+      if(d.id===kf&&!sel){g.save();g.setLineDash([6,4]);g.strokeStyle='#7ff';g.lineWidth=3;g.beginPath();g.arc(d.x,d.y,s*.6,0,Math.PI*2);g.stroke();g.restore()}
       if(sel||mode){g.save();g.shadowColor=mode?'#7ff':'#ffd54a';g.shadowBlur=18;g.strokeStyle=mode?'#7ff':'#ffd54a';g.lineWidth=3;g.beginPath();g.arc(d.x,d.y,s*.56+Math.sin(now/150)*2,0,Math.PI*2);g.stroke();g.restore()}
       drawCube(g,d.x,d.y-(sel?4:0),s*d.sc,d.q,d.fr?'f':d.col);
       if(d.burn)drawFlame(g,d.x,d.y-s*.42,s,now);
@@ -1519,7 +1626,7 @@ function renderMap(){
       <div class="box"><h4>⚔️ 장착 장비 (${S.eq.length}/${maxEq()})</h4><div class="eqlist">${S.eq.map(eqRow).join('')}</div>
         <div class="row" style="margin-top:8px"><button class="btn alt sm" data-a="bag">🎒 장비 관리 (가방 ${S.bag.length})</button></div></div>
       <div class="box"><h4>🗺️ 범례</h4><div class="legend">${Object.values(NODE).map(n=>`<span>${n.i} ${n.n}</span>`).join('')}</div></div>
-      <div class="box"><h4>👸 여신의 팁</h4><div style="font-size:13px;color:var(--gold2);line-height:1.55">${pick(TIPS)}</div></div>
+      <div class="box"><h4>👸 여신의 팁</h4><div style="font-size:13px;color:var(--gold2);line-height:1.55">${uiPick(TIPS)}</div></div>
     </div></div>`;
   $('svg.map').onclick=e=>{const g=e.target.closest('.node.avail');if(g)enterNode(+g.dataset.r,+g.dataset.i)};
   const b=$('.side [data-a="bag"]');if(b)b.onclick=openBag;
@@ -1549,6 +1656,7 @@ function combatShell(){
     <div class="ez"><div class="fighter"><div class="por" id="e-por"></div><div class="fname" id="e-name"></div><div class="bar" id="e-hp"></div><div class="chips" id="e-chips"></div></div>
       <div class="cards ecards" id="ecards"></div></div>
     <div id="ann" role="status" aria-live="polite"></div>
+    <div class="sr-only" id="dicebtns" role="group" aria-label="내 주사위"></div>
     <div class="pz"><div class="cards" id="pcards"></div></div>
     <div class="tz">
       <div class="pinfo fighter"><div class="por small" id="p-por"></div><div class="fname" id="p-name"></div><div class="bar" id="p-hp"></div><div class="chips" id="p-chips"></div><div class="warn" id="p-warn"></div></div>
@@ -1566,7 +1674,7 @@ function renderCombat(){
     $('#e-por').textContent=C.E.i;$('#p-por').textContent=CL[S.cls].i;
     if(C.phase==='player'&&!UI.busy)Tray.setRest(C.dice,'p');
   }
-  updEnemy();updPCards();updPlayer();updActs();
+  updEnemy();updPCards();updPlayer();updActs();updDiceBtns();
   UI.flashQ.splice(0).forEach(sel=>{const el=$(sel);if(el){el.classList.remove('flash');void el.offsetWidth;el.classList.add('flash')}});
 }
 function intentText(c){
@@ -1625,10 +1733,23 @@ function updPlayer(){
   const inc=C.phase==='player'&&!UI.hideIntents?incoming():0;
   $('#p-warn').innerHTML=inc>0?`⚠ 예상 피해 ${inc}${C.pb?` · 🛡${C.pb}`:''}`:'';
 }
+// 캔버스 주사위를 키보드·스크린리더로 고를 수 있게 하는 숨은 버튼 목록 (포커스는 트레이에 점선 고리로 표시)
+function updDiceBtns(){
+  const C=S.combat,box=$('#dicebtns');if(!box)return;
+  const a=document.activeElement,f=a&&a.closest&&a.closest('#dicebtns')?a.dataset.did:null;
+  const dis=UI.busy||C.phase!=='player',pre=UI.mode==='reroll'?'다시 굴리기 — ':UI.mode==='allin'?'올인 — ':'';
+  box.innerHTML=C.dice.map((d,i)=>`<button type="button" data-did="${d.id}" aria-pressed="${UI.sel===d.id}"${dis?' aria-disabled="true"':''}>${pre}주사위 ${i+1}번, 눈 ${d.v}${d.fr?' (빙결)':''}${d.burn?' (화상: 쓰면 체력 2 감소)':''}</button>`).join('');
+  if(f!=null){const el=box.querySelector(`[data-did="${f}"]`)||box.querySelector('button');if(el)el.focus({preventScroll:true})}
+}
+function chooseDie(id){
+  const C=S&&S.combat;if(!C||UI.busy||C.phase!=='player'||!C.dice.some(d=>d.id===id))return;
+  if(UI.mode){skillOnDie(id);return}
+  UI.sel=UI.sel===id?null:id;SFX.select();render();
+}
 function updActs(){
   const C=S.combat,dis=UI.busy||C.phase!=='player',cl=CL[S.cls];let sk='';
   const sd=C.dice.find(d=>d.id===UI.sel);
-  $('#tray').setAttribute('aria-label',C.dice.length?`내 주사위: ${C.dice.map((d,i)=>`${i+1}번 ${d.v}${d.fr?'(빙결)':''}${d.burn?'(화상)':''}`).join(', ')}${sd?`. 선택됨: ${sd.v}`:''}. 숫자키로 고르고, Tab으로 장비를 골라 Enter로 넣으세요.`:'남은 주사위 없음');
+  $('#tray').setAttribute('aria-label',C.dice.length?`내 주사위: ${C.dice.map((d,i)=>`${i+1}번 ${d.v}${d.fr?'(빙결)':''}${d.burn?'(화상)':''}`).join(', ')}${sd?`. 선택됨: ${sd.v}`:''}. 숫자키나 Tab으로 주사위를 고르고, Tab으로 장비를 골라 Enter로 넣으세요.`:'남은 주사위 없음');
   if(S.cls==='warrior'||S.cls==='gambler')
     sk=`<button class="btn alt ${UI.mode?'on':''}" data-a="skill" data-tip="${esc(cl.skd)}" ${dis||C.sk<=0?'disabled':''}>${cl.ski} ${cl.sk} <small>(${C.sk})</small></button>`;
   else if(S.cls==='mage'){const n=C.cards.filter(c=>c.sp).length;
@@ -1684,6 +1805,8 @@ function bindCombat(){
     const best=[...C.dice].sort((a,b)=>b.v-a.v).find(d=>canPlace(ci,d.v)>=0);
     if(best)placeDie(ci,best.id,slot?+slot.dataset.s:null);else{SFX.error();announce('이 장비에 넣을 수 있는 주사위가 없어요.')}
   });
+  const db=$('#dicebtns');
+  db.addEventListener('click',e=>{const b=e.target.closest('[data-did]');if(b)chooseDie(+b.dataset.did)});
   $('#acts').addEventListener('click',e=>{
     const b=e.target.closest('[data-a]');if(!b||b.disabled)return;
     if(b.dataset.a==='end')endTurn();else if(b.dataset.a==='skill')useSkill();
@@ -1697,11 +1820,7 @@ function itemCardHTML(it,extra='',attrs=''){
     <div class="c-slots">${conds.map(c=>c.t==='cd'?`<div class="slot cd"><div class="cdn">${c.n}</div><small>카운트</small></div>`:`<div class="slot">${condLabel(c)}</div>`).join('')}</div>
     <div class="c-desc">${descHTML(d.desc(it.u))}</div>${d.rar?`<div class="rar">${'★'.repeat(d.rar)}</div>`:''}${extra}</div>`;
 }
-function addItem(it){
-  const n=IT[it.id].name+(it.u?'+':'');
-  if(gainItem(it)==='eq')toast(`${IT[it.id].icon} ${n} 장착!`);else toast(`🎒 ${n} → 가방에 보관 (장비 칸 가득 참)`);
-  SFX.buy();
-}
+function addItem(it){gotToast({it,where:gainItem(it)})}
 function renderReward(){
   const x=S.ctx,skip=10+S.floor*3;
   $('#screen').innerHTML=`<div class="page"><div class="panel">
@@ -1732,16 +1851,15 @@ function confirmBox(msg,yes){
   modal(`<h2>확인</h2><p>${msg}</p><div class="row"><button class="btn red" data-a="yes">예</button><button class="btn alt" data-a="close">아니오</button></div>`,
     box=>box.querySelector('[data-a="yes"]').onclick=()=>{closeModal();yes()});
 }
-function allItems(){return[...S.eq.map((it,i)=>({it,l:'eq',i})),...S.bag.map((it,i)=>({it,l:'bag',i}))]}
-const upgradable=()=>allItems().filter(r=>!r.it.u);
 function pickItem(title,list,label,onPick){
   modal(`<h2>${title}</h2>${list.length?`<div class="pickgrid">${list.map((r,k)=>itemCardHTML(r.it,`<div class="arrow">${label(r)}</div>`,`data-k="${k}" tabindex="0" role="button"`)).join('')}</div>`:'<p>대상 장비가 없습니다.</p>'}
     <div class="row"><button class="btn alt" data-a="close">취소</button></div>`,
     box=>box.addEventListener('click',e=>{const c=e.target.closest('[data-k]');if(c){closeModal();onPick(list[+c.dataset.k])}}));
 }
 const upLabel=r=>`⬆ ${IT[r.it.id].slots(1).map(condText).join(' + ')}<br>${descHTML(IT[r.it.id].desc(1))}`;
-function doUpgrade(title,after){
-  pickItem(title,upgradable(),upLabel,r=>{r.it.u=1;SFX.levelup();toast(`🔨 ${IT[r.it.id].name}+ 강화 완료!`);after&&after();save();render()});
+// act: 엔진의 강화 동작 (buyUpgrade·forgeUpgrade·wheelUpgrade) — 성공하면 true
+function doUpgrade(title,act){
+  pickItem(title,upgradable(),upLabel,r=>{if(!act(r))return;SFX.levelup();toast(`🔨 ${IT[r.it.id].name}+ 강화 완료!`);save();render()});
 }
 function openBag(){
   if(!S)return;
@@ -1755,9 +1873,7 @@ function openBag(){
     <div class="row"><button class="btn" data-a="close">닫기</button></div>`,
     box=>box.addEventListener('click',e=>{
       const u=e.target.closest('[data-un]'),q=e.target.closest('[data-eq]');
-      if(u&&!u.disabled){S.bag.push(...S.eq.splice(+u.dataset.un,1))}
-      else if(q&&!q.disabled){S.eq.push(...S.bag.splice(+q.dataset.eq,1))}
-      else return;
+      if(!((u&&!u.disabled&&unequip(+u.dataset.un))||(q&&!q.disabled&&equip(+q.dataset.eq))))return;
       SFX.place();save();renderTop();if(S.screen==='map')renderMap();openBag();
     }));
 }
@@ -1775,7 +1891,7 @@ function openHelp(){
   <h3>🗺️ 던전</h3><ul><li>${Object.values(NODE).map(n=>n.i+' '+n.n).join(' · ')}</li>
    <li>승리하면 골드·경험치와 장비 보상을 얻습니다. 레벨 3과 6에 주사위가 늘어나고, 대장간·상점에서 장비를 <b>강화(+)</b>해 조건을 완화하거나 효과를 키울 수 있습니다.</li>
    <li>진행 상황(층, 장비, 가방, 골드, 체력, 전투 상태)은 행동할 때마다 브라우저에 자동 저장됩니다.</li></ul>
-  <h3>⌨️ 키보드</h3><p>1~9 주사위 선택 · Tab으로 장비 카드·맵 노드 이동 후 Enter/Space로 실행 · E 턴 종료 · R 스킬 · Esc 선택 취소<br>메뉴의 📊 전투 기록에서 보스별 승률·평균 턴을 볼 수 있습니다(이 브라우저에만 저장).</p>
+  <h3>⌨️ 키보드</h3><p>1~9 주사위 선택 (또는 Tab으로 주사위 버튼에 가서 Enter) · Tab으로 장비 카드·맵 노드 이동 후 Enter/Space로 실행 · E 턴 종료 · R 스킬 · Esc 선택 취소<br>메뉴의 📊 전투 기록에서 보스별 승률·평균 턴을 볼 수 있습니다(이 브라우저에만 저장).</p>
   <div class="row"><button class="btn" data-a="close">알겠어요!</button></div>`);
 }
 function openStats(){
@@ -1815,43 +1931,36 @@ function openMenu(){
 }
 
 // ---------- 상점 ----------
-const price=it=>Math.round(({1:30,2:52,3:85}[IT[it.id].rar]+S.floor*3)*(it.u?1.4:1));
-const upPrice=()=>40+S.floor*6;
-function enterShop(){S.ctx={stock:rollItems(4,1).map(it=>({...it,sold:0})),apples:2,upg:1};S.screen='shop';save();render()}
+const gotToast=r=>{const n=IT[r.it.id].name+(r.it.u?'+':'');toast(r.where==='eq'?`${IT[r.it.id].icon} ${n} 장착!`:`🎒 ${n} → 가방에 보관 (장비 칸 가득 참)`);SFX.buy()};
+function enterShop(){openShop();save();render()}
 function renderShop(){
   const x=S.ctx;
   $('#screen').innerHTML=`<div class="page"><div class="panel">
     <div class="bigico">🛒</div><h2>여신의 매점</h2>
     <div class="fortuna"><div class="face">🐱</div><div class="say">어서 오세요냥~ 여신님 몰래 좋은 물건만 모아놨다냥. <br>보유 골드: <b>🪙 ${S.gold}</b></div></div>
-    <div class="shopgrid">${x.stock.map((it,k)=>`<div class="${it.sold?'sold':''}">${itemCardHTML(it,`<button class="btn sm" data-buy="${k}" ${it.sold||S.gold<price(it)?'disabled':''}>${it.sold?'판매 완료':'🪙 '+price(it)}</button>`)}</div>`).join('')}</div>
+    <div class="shopgrid">${x.stock.map((it,k)=>`<div class="${it.sold?'sold':''}">${itemCardHTML(it,`<button class="btn sm" data-buy="${k}" ${canBuy(k)?'':'disabled'}>${it.sold?'판매 완료':'🪙 '+price(it)}</button>`)}</div>`).join('')}</div>
     <div class="svc">
-      <button class="btn alt" data-a="apple" ${x.apples<=0||S.gold<20||S.hp>=S.maxhp?'disabled':''}>🍎 사과 (체력 +20) 🪙20 <small>남은 ${x.apples}</small></button>
-      <button class="btn alt" data-a="upg" ${x.upg<=0||S.gold<upPrice()||!upgradable().length?'disabled':''}>🔨 장비 강화 🪙${upPrice()}</button>
+      <button class="btn alt" data-a="apple" ${canBuyApple()?'':'disabled'}>🍎 사과 (체력 +${APPLE_HEAL}) 🪙${APPLE_COST} <small>남은 ${x.apples}</small></button>
+      <button class="btn alt" data-a="upg" ${canBuyUpgrade()?'':'disabled'}>🔨 장비 강화 🪙${upPrice()}</button>
       <button class="btn alt" data-a="sell">💰 장비 판매</button>
     </div>
     <div class="row"><button class="btn" data-a="leave">상점 나가기 ▶</button></div></div></div>`;
   $('#screen .panel').onclick=e=>{
     const b=e.target.closest('[data-buy]');
-    if(b&&!b.disabled){const it=x.stock[+b.dataset.buy];S.gold-=price(it);it.sold=1;addItem({id:it.id,u:it.u});save();render();return}
+    if(b&&!b.disabled){const r=buyItem(+b.dataset.buy);if(r){gotToast(r);save();render()}return}
     const a=e.target.closest('[data-a]');if(!a||a.disabled)return;
-    if(a.dataset.a==='apple'){S.gold-=20;x.apples--;S.hp=Math.min(S.maxhp,S.hp+20);SFX.heal();save();render()}
-    else if(a.dataset.a==='upg')doUpgrade(`🔨 강화할 장비 선택 (🪙${upPrice()})`,()=>{S.gold-=upPrice();x.upg--});
-    else if(a.dataset.a==='sell'){
-      const list=allItems().filter(r=>r.l==='bag'||S.eq.length>1);
-      pickItem('💰 판매할 장비 선택',list,r=>`🪙 ${Math.floor(price(r.it)*.4)}에 판매`,r=>{
-        S.gold+=Math.floor(price(r.it)*.4);(r.l==='eq'?S.eq:S.bag).splice(r.i,1);SFX.coin();save();render()});
-    }
+    if(a.dataset.a==='apple'){if(buyApple()){SFX.heal();save();render()}}
+    else if(a.dataset.a==='upg')doUpgrade(`🔨 강화할 장비 선택 (🪙${upPrice()})`,buyUpgrade);
+    else if(a.dataset.a==='sell')pickItem('💰 판매할 장비 선택',sellable(),r=>`🪙 ${sellPrice(r.it)}에 판매`,r=>{if(sellItem(r)){SFX.coin();save();render()}});
     else if(a.dataset.a==='leave')afterNode();
   };
 }
 
 // ---------- 보물 상자 ----------
 function enterTreasure(){
-  if(S.floor>=2&&Math.random()<.12){
-    startCombat('normal','mimic',{hp:16+S.floor*9});
-    setTimeout(()=>announce('상자가… 움직인다?! 미믹이었어요! 🎁'),50);return;
-  }
-  S.ctx={opened:0,items:rollItems(2,S.floor>=3?2:1),gold:R(15,25)+S.floor*5};S.screen='treasure';save();render();
+  const r=openTreasure();
+  if(r.mimic){startCombat('normal','mimic',{hp:r.hp});setTimeout(()=>announce('상자가… 움직인다?! 미믹이었어요! 🎁'),50);return}
+  save();render();
 }
 function renderTreasure(){
   const x=S.ctx;
@@ -1864,28 +1973,26 @@ function renderTreasure(){
       <div class="row"><button class="btn glow" data-a="open">상자 열기</button></div>`}</div></div>`;
   $('#screen .panel').onclick=e=>{
     const p=e.target.closest('[data-pick]');
-    if(p){addItem(x.items[+p.dataset.pick]);afterNode();return}
+    if(p){const r=treasurePick(+p.dataset.pick);if(r){gotToast(r);afterNode()}return}
     const a=e.target.closest('[data-a]');if(!a)return;
-    if(a.dataset.a==='open'){x.opened=1;SFX.open();save();render()}
-    else if(a.dataset.a==='gold'){S.gold+=x.gold;S.st.gold+=x.gold;SFX.coin();afterNode()}
+    if(a.dataset.a==='open'){treasureOpen();SFX.open();save();render()}
+    else if(a.dataset.a==='gold'){if(treasureGold()){SFX.coin();afterNode()}}
   };
 }
 
 // ---------- 회복 사과 ----------
 function renderApple(){
-  const heal=Math.round(S.maxhp*.35);
   $('#screen').innerHTML=`<div class="page"><div class="panel">
     <div class="bigico">🌳</div><h2>행운의 사과나무</h2>
     <div class="fortuna"><div class="face">👸</div><div class="say">쉬어 가세요. 사과는 딱 하나만이에요!</div></div>
     <div class="shopgrid">
-      <div class="card t-shield icard" style="width:230px"><div class="bigico" style="font-size:56px">🍎</div><b>빨간 사과</b><div class="c-desc">체력 ${heal} 회복 (최대 체력의 35%)</div><button class="btn" data-a="red">먹는다</button></div>
+      <div class="card t-shield icard" style="width:230px"><div class="bigico" style="font-size:56px">🍎</div><b>빨간 사과</b><div class="c-desc">체력 ${appleHeal()} 회복 (최대 체력의 35%)</div><button class="btn" data-a="red">먹는다</button></div>
       <div class="card t-utility icard" style="width:230px"><div class="bigico" style="font-size:56px">🍏</div><b>황금 사과</b><div class="c-desc">최대 체력 +6, 체력 6 회복</div><button class="btn" data-a="gold">먹는다</button></div>
     </div></div></div>`;
   $('#screen .panel').onclick=e=>{
     const a=e.target.closest('[data-a]');if(!a)return;
-    if(a.dataset.a==='red'){S.hp=Math.min(S.maxhp,S.hp+heal);toast(`🍎 체력 +${heal}`)}
-    else{S.maxhp+=6;S.hp=Math.min(S.maxhp,S.hp+6);toast('🍏 최대 체력 +6')}
-    SFX.heal();afterNode();
+    const n=eatApple(a.dataset.a);
+    toast(a.dataset.a==='gold'?'🍏 최대 체력 +6':`🍎 체력 +${n}`);SFX.heal();afterNode();
   };
 }
 
@@ -1896,32 +2003,27 @@ function renderForge(){
     <div class="bigico">⚒️</div><h2>드워프 대장간</h2>
     <div class="fortuna"><div class="face">🧔</div><div class="say">${x.done?'좋은 물건이 됐군! 잘 써먹으라고.':'망치질 한 번이면 충분하지! 장비 하나를 공짜로 강화해 주마. 아니면 불가에서 좀 쉬었다 가든가.'}</div></div>
     <div class="row">${x.done?'<button class="btn" data-a="leave">떠나기 ▶</button>'
-      :`<button class="btn glow" data-a="up" ${can?'':'disabled'}>🔨 장비 강화 (무료)</button><button class="btn alt" data-a="rest">🔥 불가에서 휴식 (체력 +12)</button>`}</div></div></div>`;
+      :`<button class="btn glow" data-a="up" ${can?'':'disabled'}>🔨 장비 강화 (무료)</button><button class="btn alt" data-a="rest">🔥 불가에서 휴식 (체력 +${FORGE_REST})</button>`}</div></div></div>`;
   $('#screen .panel').onclick=e=>{
     const a=e.target.closest('[data-a]');if(!a||a.disabled)return;
-    if(a.dataset.a==='up')doUpgrade('🔨 강화할 장비 선택',()=>{x.done=1});
-    else if(a.dataset.a==='rest'){S.hp=Math.min(S.maxhp,S.hp+12);SFX.heal();toast('🔥 체력 +12');afterNode()}
+    if(a.dataset.a==='up')doUpgrade('🔨 강화할 장비 선택',forgeUpgrade);
+    else if(a.dataset.a==='rest'){const h=forgeRest();SFX.heal();toast(`🔥 체력 +${h}`);afterNode()}
     else afterNode();
   };
 }
 
 // ---------- 여신의 이벤트 ----------
-const WHEEL=[
-  {t:'🪙 +40',c:'#b8871c',f:()=>{S.gold+=40;S.st.gold+=40}},
-  {t:'❤️ +25',c:'#2f9e6e',f:()=>{S.hp=Math.min(S.maxhp,S.hp+25)}},
-  {t:'🎁 장비',c:'#6a3fb0',f:()=>addItem(rollItems(1,2)[0])},
-  {t:'꽝!',c:'#444',f:()=>{}},
-  {t:'🔨 강화',c:'#2d5fa8',f:()=>{S.ctx.pendUp=upgradable().length?1:0;if(!S.ctx.pendUp){S.gold+=25;toast('강화할 장비가 없어 🪙25로 대신!')}}},
-  {t:'💔 -10',c:'#a8283f',f:()=>{S.hp=Math.max(1,S.hp-10)}},
-  {t:'❤️ 최대+5',c:'#c0622a',f:()=>{S.maxhp+=5;S.hp+=5}},
-  {t:'🪙 반토막',c:'#5a2030',f:()=>{S.gold=Math.floor(S.gold/2)}},
-];
-function enterEvent(){S.ctx={type:pick(['roulette','duel','deal']),done:0};S.screen='event';save();render()}
-function applyWheel(){const x=S.ctx;if(x.applied)return;x.applied=1;WHEEL[x.res].f();save()}
+function enterEvent(){openEvent();save();render()}
+function wheelFx(o){
+  if(!o)return;
+  if(o.it)gotToast(o);
+  if(o.fallback)toast(`강화할 장비가 없어 🪙${o.fallback}로 대신!`);
+  ['none','hurt','halve'].includes(o.k)?SFX.error():SFX.fanfare();
+}
 function renderEvent(){
   const x=S.ctx;let body='';
   if(x.type==='roulette'){
-    if(x.res!=null&&!x.applied&&!x.spinning)applyWheel();
+    if(x.res!=null&&!x.applied&&!x.spinning){wheelFx(applyWheel());save()}
     const rot=x.res!=null?360*6-(x.res*45+22.5):0;
     body=`<h2>🎡 여신의 룰렛</h2>
       <div class="fortuna"><div class="face">👸</div><div class="say">${x.res==null?'한 번 돌려 보시겠어요? 무엇이 나올지는… 저도 몰라요♡':x.spinning?'돌아간다~ 돌아간다~!':`결과는… <b>${WHEEL[x.res].t}</b>!`}</div></div>
@@ -1933,37 +2035,40 @@ function renderEvent(){
     const du=x.duel;
     body=`<h2>🐰 주사위 대결</h2>
       <div class="fortuna"><div class="face">🐰</div><div class="say">${du?(du.win>0?'으앙, 졌다! 판돈 가져가~':du.win<0?'헤헤, 내가 이겼다! 판돈은 내 거~':'무승부! 판돈은 돌려줄게.'):'여신님의 조수 토끼가 대결을 신청합니다! 주사위 2개의 합이 높은 쪽이 판돈을 가져가요.'}</div></div>
-      ${du?`<div class="duel"><div class="side2"><b>도전자</b><div>${du.p.map(v=>`<img src="${dieURL(v,'p')}">`).join('')}</div><div class="tot">${du.p[0]+du.p[1]}</div></div><div class="tot">VS</div>
-        <div class="side2"><b>토끼</b><div>${du.h.map(v=>`<img src="${dieURL(v,'e')}">`).join('')}</div><div class="tot">${du.h[0]+du.h[1]}</div></div></div>
+      ${du?`<div class="duel"><div class="side2"><b>도전자</b><div>${du.p.map(v=>`<img src="${dieURL(v,'p')}" alt="${v}">`).join('')}</div><div class="tot">${du.p[0]+du.p[1]}</div></div><div class="tot">VS</div>
+        <div class="side2"><b>토끼</b><div>${du.h.map(v=>`<img src="${dieURL(v,'e')}" alt="${v}">`).join('')}</div><div class="tot">${du.h[0]+du.h[1]}</div></div></div>
         <div class="row"><button class="btn" data-a="leave">계속 ▶</button></div>`
-      :`<div class="row">${[20,50].map(b=>`<button class="btn" data-bet="${b}" ${S.gold<b?'disabled':''}>🪙 ${b} 걸기</button>`).join('')}<button class="btn alt" data-a="leave">거절한다</button></div>`}`;
+      :`<div class="row">${DUEL_BETS.map(b=>`<button class="btn" data-bet="${b}" ${S.gold<b?'disabled':''}>🪙 ${b} 걸기</button>`).join('')}<button class="btn alt" data-a="leave">거절한다</button></div>`}`;
   }else{
+    const msg=x.got?`계약 성립♡ ${IT[x.got.id].icon} ${IT[x.got.id].name}${x.got.u?'+':''}을(를) 드렸어요.`
+      :x.upId?`${IT[x.upId].icon} ${IT[x.upId].name}을(를) 강화해 드렸어요. 반짝반짝~`
+      :x.done?'거래는 끝났어요.':'공짜는 없는 법이죠. 무언가를 바치면, 그만한 걸 드릴게요.';
     body=`<h2>🌙 여신의 거래</h2>
-      <div class="fortuna"><div class="face">👸</div><div class="say">${x.msg||'공짜는 없는 법이죠. 무언가를 바치면, 그만한 걸 드릴게요.'}</div></div>
+      <div class="fortuna"><div class="face">👸</div><div class="say">${msg}</div></div>
       <div class="row">${x.done?'<button class="btn" data-a="leave">계속 ▶</button>'
-        :`<button class="btn red" data-a="blood" ${S.hp<=12?'disabled':''}>❤️ 체력 12를 바치고 희귀 장비 받기</button>
-          <button class="btn" data-a="coin" ${S.gold<40||!upgradable().length?'disabled':''}>🪙 40을 바치고 무작위 장비 강화</button>
+        :`<button class="btn red" data-a="blood" ${canDealBlood()?'':'disabled'}>❤️ 체력 ${DEAL_HP}를 바치고 희귀 장비 받기</button>
+          <button class="btn" data-a="coin" ${canDealCoin()?'':'disabled'}>🪙 ${DEAL_GOLD}을 바치고 무작위 장비 강화</button>
           <button class="btn alt" data-a="leave">거절한다</button>`}</div>`;
   }
   $('#screen').innerHTML=`<div class="page"><div class="panel">${body}</div></div>`;
   $('#screen .panel').onclick=e=>{
     const bet=e.target.closest('[data-bet]');
     if(bet&&!bet.disabled){
-      const b=+bet.dataset.bet,p=[d6(),d6()],h=[d6(),d6()],w=Math.sign(p[0]+p[1]-h[0]-h[1]);
-      S.gold+=w*b;if(w>0)S.st.gold+=b;x.duel={p,h,win:w,bet:b};x.done=1;SFX.rattle();setTimeout(()=>w>0?SFX.coin():w<0?SFX.error():0,500);save();render();return;
+      const du=duel(+bet.dataset.bet);if(!du)return;
+      SFX.rattle();setTimeout(()=>du.win>0?SFX.coin():du.win<0?SFX.error():0,500);save();render();return;
     }
     const a=e.target.closest('[data-a]');if(!a||a.disabled)return;
     switch(a.dataset.a){
       case 'spin':{
-        x.res=R(0,WHEEL.length-1);x.applied=0;save();x.spinning=1;render();SFX.select();
-        const disc=$('.wheel .disc');requestAnimationFrame(()=>requestAnimationFrame(()=>{disc.style.transform=`rotate(${360*6-(x.res*45+22.5)}deg)`}));
+        const res=spinWheel();save();x.spinning=1;render();SFX.select();
+        const disc=$('.wheel .disc');requestAnimationFrame(()=>requestAnimationFrame(()=>{disc.style.transform=`rotate(${360*6-(res*45+22.5)}deg)`}));
         let t=0;const tk=()=>{if(t>4000)return;SFX.tick();t+=40+t*.12;setTimeout(tk,40+t*.12)};tk();
-        setTimeout(()=>{delete x.spinning;applyWheel();x.res===3||x.res===5||x.res===7?SFX.error():SFX.fanfare();render()},4400);
+        const s0=S;setTimeout(()=>{if(S!==s0||S.ctx!==x)return;delete x.spinning;wheelFx(applyWheel());save();render()},4400);
         break;
       }
-      case 'up':doUpgrade('🔨 강화할 장비 선택',()=>{x.pendUp=0});break;
-      case 'blood':S.hp-=12;x.done=1;{const it=rollItems(1,2)[0];addItem(it);x.msg=`계약 성립♡ ${IT[it.id].icon} ${IT[it.id].name}${it.u?'+':''}을(를) 드렸어요.`}SFX.spell();save();render();break;
-      case 'coin':{S.gold-=40;x.done=1;const r=pick(upgradable());r.it.u=1;x.msg=`${IT[r.it.id].icon} ${IT[r.it.id].name}을(를) 강화해 드렸어요. 반짝반짝~`;SFX.levelup();save();render();break}
+      case 'up':doUpgrade('🔨 강화할 장비 선택',wheelUpgrade);break;
+      case 'blood':{const r=dealBlood();if(r){gotToast(r);SFX.spell();save();render()}break}
+      case 'coin':if(dealCoin()){SFX.levelup();save();render()}break;
       case 'leave':afterNode();break;
     }
   };
@@ -2046,8 +2151,7 @@ function init(){
     else if(k==='escape'){UI.sel=null;UI.mode=null;render()}
     else if(k==='r'||k==='q')useSkill();
     else if(/^[1-9]$/.test(k)&&!UI.busy&&C.phase==='player'){
-      const d=C.dice[+k-1];if(!d)return;
-      if(UI.mode)skillOnDie(d.id);else{UI.sel=UI.sel===d.id?null:d.id;SFX.select();render()}
+      const d=C.dice[+k-1];if(d)chooseDie(d.id);
     }
   });
   render();

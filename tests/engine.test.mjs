@@ -271,3 +271,94 @@ test('세이브: 왕복 · 손상 거부 · 복구', () => {
   const bb = p(mut(o => { o.combat = null; o.screen = 'map'; o.pos = { r: 6, i: 0 } }));
   assert.deepEqual([bb.s.screen, bb.s.floor, bb.s.pos], ['floor', 2, null], '보스방 직후면 다음 층');
 });
+
+test('엔진 이벤트 이름: 등록된 것만 쓰고, UI가 전부 처리한다', () => {
+  const E = boot();
+  const events = E.json('EVENTS');
+  const emitted = [...SRC.matchAll(/emit\('(\w+)'/g)].map(m => m[1]);
+  assert.deepEqual([...new Set(emitted)].filter(t => !events.includes(t)), [], '미등록 이벤트를 emit');
+  const ui = html.slice(html.indexOf('onEvent((type,p)=>{'));
+  const handled = [...ui.slice(0, ui.indexOf('\n});')).matchAll(/case '(\w+)'/g)].map(m => m[1]);
+  assert.deepEqual([...handled].sort(), [...events].sort(), 'UI가 처리하는 이벤트와 등록 목록이 다름');
+  assert.throws(() => E.ev('emit("hrut",{})'), /알 수 없는 엔진 이벤트/);
+});
+
+test('상점: 구매·사과·강화·판매 규칙', () => {
+  const E = boot(5);
+  E.ev(`S=createRun('warrior',0);S.gold=500;openShop()`);
+  const p0 = E.ev('price(S.ctx.stock[0])');
+  const r = E.json('buyItem(0)');
+  assert.equal(E.ev('S.gold'), 500 - p0);
+  assert.equal(r.where, 'eq');
+  assert.equal(E.ev('buyItem(0)'), null, '같은 물건은 한 번만');
+  E.ev('S.hp=10');
+  assert.equal(E.ev('buyApple()&&buyApple()&&!buyApple()'), true, '사과는 2개까지');
+  assert.equal(E.ev('S.hp'), 50);
+  const cost = E.ev('upPrice()'), g = E.ev('S.gold');
+  assert.equal(E.ev('buyUpgrade(upgradable()[0])'), true);
+  assert.deepEqual(E.json('[S.gold,S.eq[0].u,canBuyUpgrade()]'), [g - cost, 1, false], '강화는 상점당 1회');
+  // 판매: 마지막 장착 장비는 못 판다, 목록을 연 뒤 바뀐 ref는 무효
+  E.ev('S.eq=[S.eq[0]];S.bag=[{id:"sword",u:0}]');
+  assert.deepEqual(E.json('sellable().map(r=>r.l)'), ['bag']);
+  assert.equal(E.ev('sellItem({it:S.eq[0],l:"eq",i:0})'), 0);
+  const stale = E.ev('JSON.stringify(sellable()[0])');
+  assert.ok(E.ev('sellItem(sellable()[0])') > 0);
+  assert.equal(E.ev(`sellItem(${stale})`), 0, '이미 팔린 장비');
+});
+
+test('장비 관리: 장착 칸 제한', () => {
+  const E = boot();
+  E.ev(`S=createRun('warrior',0);S.bag=[{id:'bow',u:0},{id:'axe',u:0},{id:'gloves',u:0}]`);
+  assert.equal(E.ev('equip(0)&&equip(0)'), true);
+  assert.equal(E.ev('S.eq.length'), 6);
+  assert.equal(E.ev('equip(0)'), false, '6칸 초과 불가');
+  E.ev('S.eq=[S.eq[0]]');
+  assert.equal(E.ev('unequip(0)'), false, '마지막 장비는 내릴 수 없음');
+});
+
+test('보물 상자·사과나무·대장간', () => {
+  const E = boot();
+  E.ev(`S=createRun('thief',0);S.floor=3`);
+  E.ev('setRng(()=>.05)');
+  assert.deepEqual(E.json('openTreasure()'), { mimic: true, hp: 16 + 27 }, '2층부터 12% 미믹');
+  E.ev('setRng(seededRng(2));S.floor=1');
+  assert.equal(E.json('openTreasure()').mimic, false, '1층은 미믹 없음');
+  assert.equal(E.ev('treasurePick(0)'), null, '열기 전에는 못 고름');
+  E.ev('treasureOpen()');
+  const g = E.ev('S.ctx.gold'), g0 = E.ev('S.gold');
+  assert.equal(E.ev('treasureGold()'), g);
+  assert.equal(E.ev('S.gold'), g0 + g);
+  E.ev('S.maxhp=100;S.hp=90');
+  assert.equal(E.ev('eatApple("red")'), 10, '최대 체력을 넘지 않음');
+  assert.equal(E.ev('eatApple("gold")'), 6);
+  assert.equal(E.ev('S.maxhp'), 106);
+  E.ev('S.ctx={done:0}');
+  assert.equal(E.ev('forgeUpgrade(upgradable()[0])&&!forgeUpgrade(upgradable()[0])'), true, '대장간 강화는 1회');
+});
+
+test('여신의 이벤트: 룰렛·주사위 대결·거래', () => {
+  const E = boot();
+  const wheel = E.json('WHEEL.map(w=>w.k)');
+  for (const [k, check] of [['gold', 'S.gold===140'], ['heal', 'S.hp===60'], ['hurt', 'S.hp===40'], ['maxhp', 'S.maxhp===65&&S.hp===55'], ['halve', 'S.gold===50'], ['none', 'S.gold===100'], ['item', 'S.eq.length===5'], ['upgrade', 'S.ctx.pendUp===1']]) {
+    E.ev(`S=createRun('warrior',0);S.gold=100;S.hp=50;S.ctx={type:'roulette',done:0};S.ctx.res=${wheel.indexOf(k)};S.ctx.applied=0`);
+    assert.equal(E.json('applyWheel()').k, k);
+    assert.equal(E.ev(check), true, `룰렛 ${k}`);
+    assert.equal(E.ev('applyWheel()'), null, '결과는 한 번만 적용');
+  }
+  E.ev(`S=createRun('warrior',0);S.ctx={type:'roulette',done:0};setRng(()=>.99)`);
+  assert.equal(E.ev('spinWheel()'), 7);
+  E.ev('setRng(()=>0)');
+  assert.equal(E.ev('spinWheel()'), 7, '이미 정해진 결과는 다시 뽑지 않음');
+
+  E.ev(`S=createRun('warrior',0);S.gold=30;S.ctx={type:'duel',done:0}`);
+  assert.equal(E.ev('duel(50)'), null, '판돈 부족');
+  E.dice(6, 6, 1, 1);
+  assert.equal(E.json('duel(20)').win, 1);
+  assert.equal(E.ev('S.gold'), 50);
+  assert.equal(E.ev('duel(20)'), null, '대결은 한 번');
+
+  E.ev(`S=createRun('warrior',0);S.hp=12;S.gold=40;S.ctx={type:'deal',done:0}`);
+  assert.equal(E.ev('canDealBlood()'), false, '체력 12 이하는 피의 거래 불가');
+  assert.ok(E.json('dealCoin()'));
+  assert.deepEqual(E.json('[S.gold,S.ctx.done,S.eq.some(it=>it.u===1&&it.id===S.ctx.upId)]'), [0, 1, true]);
+});

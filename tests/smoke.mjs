@@ -1,9 +1,11 @@
 // 스모크 테스트: 헤드리스 Chrome(CDP)으로 index.html을 띄워
 //  1) 핵심 규칙 단위 검사  2) 저장/복구·손상 세이브 처리  3) 최종 보스 승리 경로
-//  4) 클래스별 자동 플레이(탐욕 봇)로 전체 흐름을 돌리며 런타임 에러·진행 멈춤을 잡는다.
+//  4) 실제 마우스 드래그·클릭·키보드 입력과 접근성 트리  5) 클래스별 자동 플레이(탐욕 봇)로
+//     전체 흐름을 돌리며 런타임 에러·진행 멈춤을 잡는다.
 // 실행: node tests/smoke.mjs   (Node 22+, Chrome/Chromium 필요. CHROME_PATH로 경로 지정 가능)
 // 환경변수: SMOKE_BUDGET_S = 클래스당 자동 플레이 시간 예산(초, 기본 75)
 //          SMOKE_CLASSES = 자동 플레이할 클래스 목록(쉼표 구분, 기본 warrior,thief,mage,gambler)
+//          SMOKE_SEED    = 엔진 난수 시드 (기본: 무작위, 실행 시 출력 — 실패를 같은 시드로 재현)
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -14,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BUDGET = (+process.env.SMOKE_BUDGET_S || 75) * 1000;
+const SEED = process.env.SMOKE_SEED ? +process.env.SMOKE_SEED : Math.floor(Math.random() * 1e9);
+console.log(`🎲 SMOKE_SEED=${SEED}  (재현: SMOKE_SEED=${SEED} node tests/smoke.mjs)`);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const failures = [];
 const fail = m => { failures.push(m); console.error('  ✗ ' + m) };
@@ -62,7 +66,11 @@ async function ev(expr) {
   if (r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || r.result.exceptionDetails.text);
   return r.result.result.value;
 }
-async function load() { await send('Page.navigate', { url: URL_ }); await sleep(900); await ev(`SET.sound=false;SET.speed=20;'ok'`) }
+async function load() { await send('Page.navigate', { url: URL_ }); await sleep(900); await ev(`SET.sound=false;SET.speed=20;setRng(seededRng(${SEED}));'ok'`) }
+const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+async function drag(a, b) { await mouse('mousePressed', a.x, a.y); for (let i = 1; i <= 8; i++) await mouse('mouseMoved', a.x + (b.x - a.x) * i / 8, a.y + (b.y - a.y) * i / 8); await mouse('mouseReleased', b.x, b.y) }
+async function click(p) { await mouse('mousePressed', p.x, p.y); await mouse('mouseReleased', p.x, p.y) }
+async function enter() { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }) }
 
 // ---------- 페이지에 주입할 테스트 봇 ----------
 const HARNESS = String.raw`
@@ -82,7 +90,7 @@ window.autoTurn=async()=>{const C=S.combat;
     for(const d of C.dice)C.cards.forEach((c,ci)=>{if(canPlace(ci,d.v)<0)return;const s=scoreMove(C,d,ci);if(!best||s>best.s)best={s,d,ci}});
     if(!best||best.s<=0)break;placeDie(best.ci,best.d.id,null);await W(10)}
   if(alive(C)&&!UI.busy)endTurn()};
-window.AUTO={on:false,result:null,async run(cls){this.on=true;this.result=null;S=null;wipeSave();VIEW='cls';render();newRun(cls);
+window.AUTO={on:false,result:null,async run(cls,seed){this.on=true;this.result=null;S=null;wipeSave();setRng(seededRng(seed));VIEW='cls';render();newRun(cls);
   while(this.on){try{const s=S.screen;
     if(s==='gameover'||s==='victory'){this.result={end:s,floor:S.floor,lv:S.level,kills:S.st.kills,turns:S.st.turns};this.on=false;break}
     if(s==='floor')clickSel('[data-a="go"]');
@@ -91,7 +99,7 @@ window.AUTO={on:false,result:null,async run(cls){this.on=true;this.result=null;S
     else if(s==='reward'){const x=S.ctx;let k=0;x.items.forEach((it,i)=>{if(IT[it.id].rar+it.u>IT[x.items[k].id].rar+x.items[k].u)k=i});
       if(S.eq.length>=maxEq()){const w=S.eq.reduce((m,it,i)=>IT[it.id].rar+it.u<IT[S.eq[m].id].rar+S.eq[m].u?i:m,0);S.bag.push(...S.eq.splice(w,1))}
       if(!clickSel('[data-pick="'+k+'"]'))clickSel('[data-a="skip"]')}
-    else if(s==='shop'){const b=[...document.querySelectorAll('[data-buy]')].find(b=>!b.disabled);if(b&&Math.random()<.7)b.click();
+    else if(s==='shop'){const b=[...document.querySelectorAll('[data-buy]')].find(b=>!b.disabled);if(b&&rng()<.7)b.click();
       else if(!clickSel('[data-a="apple"]')){if(clickSel('[data-a="upg"]')){await W(50);clickSel('#modal [data-k]');await W(50)}clickSel('[data-a="leave"]')}}
     else if(s==='treasure'){if(!clickSel('[data-a="open"]'))clickSel('[data-pick="0"]')}
     else if(s==='apple')clickSel(S.hp<S.maxhp*.7?'[data-a="red"]':'[data-a="gold"]');
@@ -147,10 +155,50 @@ try {
   else if (vic.screen === 'gameover') ok('(보스가 먼저 이겨 승리 경로 미확인 — 재시도 권장)');
   else fail('승리 경로: ' + JSON.stringify(vic));
 
-  console.log('\n[4] 클래스별 자동 플레이');
-  for (const cls of (process.env.SMOKE_CLASSES || 'warrior,thief,mage,gambler').split(',').map(x => x.trim()).filter(Boolean)) {
+  console.log('\n[4] 실제 입력 (마우스 드래그·클릭, 키보드) · 접근성 트리');
+  const ready = `(async()=>{for(let i=0;i<400&&!(S.combat&&S.combat.phase==='player'&&!UI.busy);i++)await W(20);await W(150);return !!S.combat})()`;
+  await ev(`S=null;wipeSave();newRun('warrior');S.eq=[{id:'sword',u:0},{id:'woodshield',u:0},{id:'hammer',u:0},{id:'flip',u:0}];S.screen='map';render();enterNode(0,0);'ok'`);
+  await ev(ready);
+  await ev(`S.combat.E.hp=S.combat.E.maxhp=999;render();'ok'`);
+  const geo = `(ci,k)=>{const d=S.combat.dice[k],t=Tray.get(d.id),p=Tray.screen(t),c=center(document.querySelector('#pcards [data-ci="'+ci+'"]'));return{id:d.id,v:d.v,die:{x:p.x,y:p.y},card:{x:c.x,y:c.y}}}`;
+  // (a) 드래그 앤 드롭: 첫 주사위를 녹슨 검(아무 눈)으로
+  const g1 = await ev(`(${geo})(0,0)`);
+  await drag(g1.die, g1.card); await sleep(250);
+  const r1 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${g1.id}),used:S.combat.cards[0].uses===0,hp:S.combat.E.hp})`);
+  r1.gone && r1.used && r1.hp < 999 ? ok(`드래그 앤 드롭 (주사위 ${g1.v} → 녹슨 검)`) : fail('드래그 앤 드롭: ' + JSON.stringify(r1));
+  // (b) 클릭으로 고른 뒤 뒤집개(아무 눈) 클릭
+  const g2 = await ev(`(${geo})(3,0)`);
+  await click(g2.die); await sleep(120);
+  const sel = await ev('UI.sel');
+  await click(g2.card); await sleep(250);
+  const r2 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${g2.id}),used:S.combat.cards[3].uses===0})`);
+  sel === g2.id && r2.gone && r2.used ? ok('클릭 선택 → 장비 클릭') : fail(`클릭 배치: sel=${sel} ${JSON.stringify(r2)}`);
+  // (c) 키보드: 주사위 버튼 포커스 → Enter로 선택, 나무 방패·해머 카드 포커스 → Enter로 투입
+  await sleep(300);
+  const kb = await ev(`(()=>{const d=S.combat.dice.find(d=>[1,2].some(ci=>canPlace(ci,d.v)>=0));if(!d)return null;const ci=[1,2].find(ci=>canPlace(ci,d.v)>=0);document.querySelector('#dicebtns [data-did="'+d.id+'"]').focus();return{id:d.id,ci}})()`);
+  if (!kb) ok('(키보드 검사 건너뜀: 넣을 수 있는 주사위 없음)');
+  else {
+    await enter(); await sleep(120);
+    const ksel = await ev('UI.sel');
+    await ev(`document.querySelector('#pcards [data-ci="${kb.ci}"]').focus();'ok'`);
+    await enter(); await sleep(250);
+    const r3 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${kb.id}),phase:S.combat.phase})`);
+    ksel === kb.id && r3.gone && r3.phase === 'player' ? ok('키보드: 주사위 버튼 Enter → 장비 카드 Enter (턴은 유지)') : fail(`키보드 배치: sel=${ksel} ${JSON.stringify(r3)}`);
+  }
+  // (d) 접근성 트리: 스크린리더가 받는 역할·이름
+  await send('Accessibility.enable');
+  const ax = (await send('Accessibility.getFullAXTree')).result.nodes.filter(n => !n.ignored).map(n => ({ role: n.role?.value, name: n.name?.value || '' }));
+  const has = (roles, re) => ax.some(n => roles.includes(n.role) && re.test(n.name));
+  const axChecks = [['주사위 그룹', has(['group'], /^내 주사위$/)], ['주사위 버튼', has(['button'], /^주사위 \d번, 눈 \d/)], ['장비 카드 버튼', has(['button'], /녹슨 검, 무기\. 조건/)],
+    ['트레이 설명', has(['image', 'img'], /^(내 주사위:|남은 주사위 없음)/)], ['적 예고', ax.some(n => /^적 장비 /.test(n.name))], ['라이브 영역', ax.filter(n => n.role === 'status').length >= 2]];
+  const axFail = axChecks.filter(([, v]) => !v).map(([k]) => k);
+  axFail.length ? fail('접근성 트리 누락: ' + axFail.join(', ')) : ok('접근성 트리 (주사위 그룹·버튼, 장비 카드, 트레이 설명, 적 예고, 라이브 영역)');
+
+  console.log('\n[5] 클래스별 자동 플레이');
+  const classes = (process.env.SMOKE_CLASSES || 'warrior,thief,mage,gambler').split(',').map(x => x.trim()).filter(Boolean);
+  for (const [ix, cls] of classes.entries()) {
     const errs0 = pageErrors.length;
-    await ev(`AUTO.run('${cls}');'ok'`);
+    await ev(`AUTO.run('${cls}',${SEED + ix});'ok'`);
     const t0 = Date.now(); let last = '', lastT = Date.now(), res = null;
     while (Date.now() - t0 < BUDGET) {
       await sleep(500);
