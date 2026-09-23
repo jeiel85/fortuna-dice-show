@@ -13,6 +13,8 @@
 ![No Assets](https://img.shields.io/badge/external%20assets-0-success)
 ![No Build](https://img.shields.io/badge/build-none-lightgrey)
 
+### [▶ 바로 플레이하기 (라이브 데모)](https://jeiel85.github.io/fortuna-dice-show/)
+
 <img src="docs/title.png" alt="타이틀 화면" width="820">
 
 </div>
@@ -34,6 +36,10 @@
 </div>
 
 ## 🚀 실행 방법
+
+**브라우저에서 바로:** 👉 **https://jeiel85.github.io/fortuna-dice-show/**
+
+**로컬에서:**
 
 ```bash
 git clone https://github.com/jeiel85/fortuna-dice-show.git
