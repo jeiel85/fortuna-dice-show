@@ -34,12 +34,20 @@ const chrome = [process.env.CHROME_PATH, 'C:/Program Files/Google/Chrome/Applica
   '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(p => p && existsSync(p));
 if (!chrome) { console.error('Chrome/Chromium을 찾을 수 없습니다. CHROME_PATH를 지정하세요.'); process.exit(2) }
-const port = 9400 + Math.floor(Math.random() * 400);
-const proc = spawn(chrome, ['--headless=new', `--remote-debugging-port=${port}`, '--no-sandbox', '--disable-gpu', '--mute-audio',
-  '--no-first-run', `--user-data-dir=${mkdtempSync(join(tmpdir(), 'dice-smoke-'))}`, '--window-size=1280,760', 'about:blank'], { stdio: 'ignore' });
-let targets;
-for (let i = 0; i < 60 && !targets; i++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json() } catch { await sleep(250) } }
-const ws = new WebSocket(targets.find(t => t.type === 'page').webSocketDebuggerUrl);
+// 포트는 Chrome이 직접 고르게 하고(0), 시작 로그의 "DevTools listening on ws://..."에서 읽는다
+const proc = spawn(chrome, ['--headless=new', '--remote-debugging-port=0', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--mute-audio',
+  '--no-first-run', `--user-data-dir=${mkdtempSync(join(tmpdir(), 'dice-smoke-'))}`, '--window-size=1280,760', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+let chromeLog = '';
+const port = await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('Chrome 디버깅 포트를 60초 안에 열지 못했습니다.\n' + chromeLog.slice(-2000))), 60000);
+  proc.stderr.on('data', b => { chromeLog += b; const m = chromeLog.match(/DevTools listening on ws:\/\/[^:]+:(\d+)\//); if (m) { clearTimeout(timer); resolve(+m[1]) } });
+  proc.on('exit', code => { clearTimeout(timer); reject(new Error(`Chrome이 종료됨 (code ${code})\n` + chromeLog.slice(-2000))) });
+}).catch(e => { console.error(e.message); server.close(); process.exit(2) });
+let targets = [];
+for (let i = 0; i < 80 && !targets.some(t => t.type === 'page'); i++) { try { targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json() } catch { await sleep(250) } }
+const pageTarget = targets.find(t => t.type === 'page');
+if (!pageTarget) { console.error('Chrome 페이지 타깃을 찾지 못했습니다.'); proc.kill(); server.close(); process.exit(2) }
+const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
 await new Promise(r => ws.onopen = r);
 let seq = 0; const pending = new Map(); const pageErrors = [];
 ws.onmessage = e => {
