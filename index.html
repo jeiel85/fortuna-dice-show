@@ -860,6 +860,14 @@ function resolveVictory(){
   return{last,lv0};
 }
 function resolveDefeat(){S.combat=null;S.screen='gameover';S.dead=1}
+// 오류 복구용: 저장된 전투 상태 때문에 계속 실패할 때, 같은 적과 처음부터 다시 (체력은 전투 시작 시점으로)
+function restartCombat(){
+  const C=S.combat;if(!C)return null;
+  if(num(C.hp0))S.hp=clamp(C.hp0,1,S.maxhp);
+  return createCombat(C.kind,C.E.key,C.E.maxhp!==EN[C.E.key].hp?{hp:C.E.maxhp}:{});
+}
+// 오류 복구용: 보상 없이 전투를 건너뛴다 (보스방이면 다음 층으로)
+function skipCombat(){if(!S.combat)return false;S.combat=null;advanceNode();return true}
 
 // =====================================================================
 //  장비 관리 · 강화 (ref = {it, l:'eq'|'bag', i})
@@ -1409,11 +1417,12 @@ function placeDie(ci,id,si,dropped){
   return true;
 }
 function unplace(ci,si){if(takeBack(ci,si)){SFX.select();save();render()}}
-function startCombat(kind,key,opt={}){
-  const C=createCombat(kind,key,opt),d=EN[key];save();
+function startCombat(kind,key,opt={}){beginCombatUI(createCombat(kind,key,opt))}
+function beginCombatUI(C){
+  const d=EN[C.E.key];save();
   UI.busy=true;render();
-  if(kind==='boss'){SFX.boss();announce(line('boss',d.n)+(d.t?'  — “'+d.t+'”':''))}
-  else announce(line(kind==='elite'?'elite':'start',d.n));
+  if(C.kind==='boss'){SFX.boss();announce(line('boss',d.n)+(d.t?'  — “'+d.t+'”':''))}
+  else announce(line(C.kind==='elite'?'elite':'start',d.n));
   setTimeout(()=>{if(alive(C))startPlayerTurn()},700/SET.speed);
 }
 async function startPlayerTurn(){
@@ -1436,7 +1445,7 @@ async function startPlayerTurn(){
   UI.hideIntents=false;render();SFX.place();
   await sleep(120);
   await Tray.roll(C.dice,'p');if(!alive(C))return;
-  UI.busy=false;render();
+  UI.busy=false;fatalCount=0;render();
   const sixes=C.dice.filter(d=>d.v===6).length,ones=C.dice.filter(d=>d.v===1).length;
   if(S.hp<S.maxhp*.25)announce(line('low'));
   else if(sixes>=2)announce(line('six'));
@@ -1592,21 +1601,40 @@ function renderTitle(){
   };
 }
 // 턴 흐름에서 예외가 나면 UI가 '처리 중'에 멈추지 않도록, 알리고 마지막 저장 지점에서 이어가게 한다
-let fatalAt=0;
+let fatalKey='',fatalCount=0;
 function onFatal(err){
   if(!err||String(err.message||err)==='Script error.')return; // 다른 출처 스크립트(확장 프로그램 등)의 오류는 무시
   console.error(err);
-  if(Date.now()-fatalAt<1500)return;fatalAt=Date.now();
+  // 이미 오류 안내가 떠 있으면 새로 띄우지 않는다 (시간으로 거르면 빠르게 이어진 '새' 오류를 놓쳐 조작이 멈춘 채 남음)
   UI.busy=false;UI.drag=null;UI.mode=null;UI.sel=null;FX.ghost=null;
-  const inRun=!!(S&&!S.dead),canReload=inRun&&!!loadSave();
+  if($('#modal.show #fataldump'))return;
+  const inRun=!!(S&&!S.dead),saved=inRun?loadSave():null;
+  // 같은 방(층·위치·화면)에서 플레이어 턴까지 가지 못하고 연달아 실패하면, 저장 상태 자체가 원인일 수 있다
+  const key=inRun?`${S.floor}:${S.pos?S.pos.r+','+S.pos.i:'-'}:${S.screen}`:'';
+  fatalCount=key&&key===fatalKey?fatalCount+1:1;fatalKey=key;
+  const stuck=fatalCount>=2&&!!saved&&saved.screen==='combat'&&!!saved.combat;
+  const msg=String(err.message||err);
+  const report=JSON.stringify({error:String(err.stack||msg),at:new Date().toISOString(),ua:navigator.userAgent,saveVersion:SAVE_V,repeat:fatalCount,save:saved||S||null},null,1);
   modal(`<h2>⚠ 문제가 생겼어요</h2>
-    <p>진행 중에 예기치 못한 오류가 발생했습니다. ${canReload?'마지막으로 저장된 지점에서 다시 이어갈 수 있어요.':inRun?'저장된 진행이 없어 타이틀로 돌아가야 해요.':''}</p>
-    <p style="font-size:12px;color:var(--dim)">${esc(String(err.message||err)).slice(0,200)}</p>
-    <div class="row">${canReload?'<button class="btn" data-a="reload">💾 마지막 저장 지점에서 이어가기</button>':''}<button class="btn alt" data-a="${inRun?'title':'close'}">${inRun?'🏠 타이틀로':'닫기'}</button></div>`,
+    <p>${stuck?'같은 전투에서 오류가 반복되고 있어요. 전투를 처음부터 다시 하거나, 보상 없이 건너뛸 수 있어요.':saved?'진행 중에 예기치 못한 오류가 발생했습니다. 마지막으로 저장된 지점에서 다시 이어갈 수 있어요.':inRun?'진행 중에 예기치 못한 오류가 발생했습니다. 저장된 진행이 없어 타이틀로 돌아가야 해요.':'예기치 못한 오류가 발생했습니다.'}</p>
+    <p style="font-size:12px;color:var(--dim)">${esc(msg).slice(0,200)}</p>
+    <div id="fataldump"></div>
+    <div class="row">
+      ${stuck?'<button class="btn" data-a="restart">🔁 이 전투를 처음부터 다시</button><button class="btn alt" data-a="skip">⏭ 보상 없이 건너뛰고 맵으로</button>'
+        :saved?'<button class="btn" data-a="reload">💾 마지막 저장 지점에서 이어가기</button>':''}
+      <button class="btn alt" data-a="report">📋 오류 정보 복사</button>
+      <button class="btn alt" data-a="${inRun?'title':'close'}">${inRun?'🏠 타이틀로':'닫기'}</button>
+    </div>`,
     box=>box.addEventListener('click',e=>{
       const a=e.target.closest('[data-a]');if(!a)return;
-      if(a.dataset.a==='reload'){closeModal();const s=loadSave();if(!s)return;S=s;$('#screen').innerHTML='';Tray.detach();resume()}
-      else if(a.dataset.a==='title'){closeModal();S=null;VIEW='title';Tray.detach();render()}
+      const fresh=()=>{closeModal();$('#screen').innerHTML='';Tray.detach();UI.busy=false;UI.hideIntents=false};
+      switch(a.dataset.a){
+        case 'reload':{const s=loadSave();if(!s)return;fresh();S=s;resume();break}
+        case 'restart':{const s=loadSave();if(!s)return;fresh();S=s;const C=restartCombat();if(C)beginCombatUI(C);else render();toast('🔁 전투를 처음부터 다시 시작합니다.');break}
+        case 'skip':{const s=loadSave();if(!s)return;fresh();S=s;skipCombat();save();render();toast('⏭ 전투를 건너뛰었습니다.');break}
+        case 'report':copyText(report,'#fataldump');break;
+        case 'title':closeModal();S=null;VIEW='title';Tray.detach();render();break;
+      }
     }));
 }
 function resume(){
@@ -1937,6 +1965,11 @@ function openHelp(){
   <h3>⌨️ 키보드</h3><p>1~9 주사위 선택 (또는 Tab으로 주사위 버튼에 가서 Enter) · Tab으로 장비 카드·맵 노드 이동 후 Enter/Space로 실행 · E 턴 종료 · R 스킬 · Esc 선택 취소<br>메뉴의 📊 전투 기록에서 보스별 승률·평균 턴을 볼 수 있습니다(이 브라우저에만 저장).</p>
   <div class="row"><button class="btn" data-a="close">알겠어요!</button></div>`);
 }
+// 클립보드에 복사하고, 권한이 없으면 holder 안에 선택된 텍스트 상자로 보여 준다
+function copyText(txt,holder){
+  const show=()=>{const h=$(holder);if(!h)return;h.innerHTML='<p>아래 내용을 직접 복사하세요.</p><textarea readonly style="width:100%;height:120px"></textarea>';const ta=h.querySelector('textarea');ta.value=txt;ta.select()};
+  if(navigator.clipboard)navigator.clipboard.writeText(txt).then(()=>toast('📋 클립보드에 복사했습니다.'),show);else show();
+}
 function openStats(){
   const l=getLog(),pct=(a,b)=>b?Math.round(a/b*100)+'%':'-',avg=(r,f)=>r.length?r.reduce((s,x)=>s+f(x),0)/r.length:null;
   const rows=FL.map((f,i)=>{
@@ -1950,11 +1983,7 @@ function openStats(){
     <div class="row"><button class="btn alt" data-a="copy" ${l.length?'':'disabled'}>📋 JSON 복사</button><button class="btn red" data-a="wipe" ${l.length?'':'disabled'}>기록 지우기</button><button class="btn" data-a="close">닫기</button></div>`,
     box=>box.addEventListener('click',e=>{
       const a=e.target.closest('[data-a]');if(!a||a.disabled)return;
-      if(a.dataset.a==='copy'){
-        const txt=JSON.stringify(l);
-        const show=()=>{$('#logdump').innerHTML='<p>아래 내용을 직접 복사하세요.</p><textarea readonly style="width:100%;height:120px"></textarea>';const ta=$('#logdump textarea');ta.value=txt;ta.select()};
-        if(navigator.clipboard)navigator.clipboard.writeText(txt).then(()=>toast('📋 기록을 클립보드에 복사했습니다.'),show);else show();
-      }else if(a.dataset.a==='wipe')confirmBox('전투 기록을 모두 지울까요?',()=>{try{localStorage.removeItem(LOGKEY)}catch(e){}toast('기록을 지웠습니다.')});
+      if(a.dataset.a==='copy')copyText(JSON.stringify(l),'#logdump');else if(a.dataset.a==='wipe')confirmBox('전투 기록을 모두 지울까요?',()=>{try{localStorage.removeItem(LOGKEY)}catch(e){}toast('기록을 지웠습니다.')});
     }));
 }
 function openMenu(){

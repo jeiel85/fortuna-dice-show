@@ -384,3 +384,20 @@ test('이전 버전 세이브(tests/fixtures)는 최신 형식으로 불러와�
   // 1 ~ SAVE_V-1 모든 버전에 다음 버전으로 가는 변환이 있어야 한다
   for (let v = 1; v < V; v++) assert.equal(E.ev(`typeof MIGRATIONS[${v}]`), 'function', `v${v} → v${v + 1} 변환 없음`);
 });
+
+test('오류 복구용: 전투 처음부터 다시 · 보상 없이 건너뛰기', () => {
+  const E = boot();
+  // 미믹처럼 체력을 바꿔 만든 전투도 같은 조건으로 다시 시작한다
+  E.ev(`S=createRun('warrior',0);S.floor=2;visitNode(0,0);S.hp=50;createCombat('normal','mimic',{hp:34});beginPlayerTurn();
+    S.hp=12;S.combat.E.hp=5;S.combat.turn=4;S.combat.pst.poison=3`);
+  E.ev('restartCombat()');
+  assert.deepEqual(E.json('[S.hp,S.combat.E.hp,S.combat.E.maxhp,S.combat.turn,S.combat.phase,S.combat.pst,S.screen]'), [50, 34, 34, 1, 'start', {}, 'combat']);
+  // 건너뛰기: 일반 방은 맵으로, 보스방은 다음 층으로 (보상 없음)
+  const g = E.ev('S.gold');
+  assert.equal(E.ev('skipCombat()'), true);
+  assert.deepEqual(E.json('[S.screen,S.combat,S.gold,S.ctx]'), ['map', null, g, null]);
+  assert.equal(E.ev('skipCombat()'), false, '전투가 없으면 아무것도 안 함');
+  E.ev(`S.pos={r:6,i:0};createCombat('boss','slot')`);
+  E.ev('skipCombat()');
+  assert.deepEqual(E.json('[S.screen,S.floor,S.pos]'), ['floor', 3, null]);
+});

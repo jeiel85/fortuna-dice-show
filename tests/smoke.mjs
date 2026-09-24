@@ -71,7 +71,13 @@ const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, but
 async function drag(a, b) { await mouse('mousePressed', a.x, a.y); for (let i = 1; i <= 8; i++) await mouse('mouseMoved', a.x + (b.x - a.x) * i / 8, a.y + (b.y - a.y) * i / 8); await mouse('mouseReleased', b.x, b.y) }
 async function click(p) { await mouse('mousePressed', p.x, p.y); await mouse('mouseReleased', p.x, p.y) }
 // 조건식이 참이 될 때까지 기다린다 (고정 대기 대신 — 느린 CI에서도 안정적)
-async function waitFor(expr, ms = 5000) { const t = Date.now(); while (Date.now() - t < ms) { try { if (await ev(expr)) return true } catch { } await sleep(40) } return false }
+// 시간이 초과되면 조건식 평가 중 마지막으로 난 예외를 출력한다 (코드 오류가 '시간 초과'로만 보이지 않게)
+async function waitFor(expr, ms = 5000) {
+  const t = Date.now(); let last = null;
+  while (Date.now() - t < ms) { try { if (await ev(expr)) return true; last = null } catch (e) { last = e } await sleep(40) }
+  console.error(`    ⏱ waitFor 시간 초과 (${ms}ms): ${expr.slice(0, 120)}${last ? `\n      마지막 예외: ${String(last.message || last).split('\n')[0]}` : ''}`);
+  return false;
+}
 async function enter() { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }) }
 
 // ---------- 페이지에 주입할 테스트 봇 ----------
@@ -146,6 +152,19 @@ try {
     if(!S.combat||S.combat.phase!=='player'||UI.busy)e.push('전투 이어하기 실패');
     return e})()`);
   saveRes.length ? saveRes.forEach(m => fail('저장: ' + m)) : ok('전투 중 저장·복구, 손상 세이브 거부/복구');
+  // 과거 버전 세이브(tests/fixtures)를 이어하기로 불러와 화면을 그리고, 전투면 다음 플레이어 턴까지 진행되는지
+  const { readdirSync } = await import('node:fs');
+  const fixtures = readdirSync(join(ROOT, 'tests', 'fixtures')).filter(f => /^save-v\d+.*\.json$/.test(f));
+  const fxBad = [];
+  for (const f of fixtures) {
+    const raw = await readFile(join(ROOT, 'tests', 'fixtures', f), 'utf8');
+    const e0 = pageErrors.length;
+    await ev(`S=null;VIEW='title';render();localStorage.setItem(KEY,${JSON.stringify(raw)});S=loadSave();if(S)resume();'ok'`);
+    const okNow = await waitFor(`S&&document.querySelector('#screen').children.length>0&&(S.screen!=='combat'||(S.combat&&S.combat.phase==='player'&&!UI.busy))`, 12000);
+    if (!okNow || pageErrors.length > e0) fxBad.push(`${f}${pageErrors.length > e0 ? ' — ' + pageErrors[e0] : ' — 진행되지 않음'}`);
+  }
+  await ev(`S=null;wipeSave();VIEW='title';render();'ok'`);
+  fxBad.length ? fxBad.forEach(m => fail('과거 세이브: ' + m)) : ok(`과거 버전 세이브 ${fixtures.length}개를 불러와 화면 표시·진행`);
 
   console.log('\n[3] 최종 보스 승리 경로');
   const vic = await ev(`(async()=>{S=null;wipeSave();newRun('gambler');S.floor=6;S.pos={r:6,i:0};S.map[6][0].v=1;startCombat('boss','fortuna');
@@ -214,20 +233,53 @@ try {
   }
 
   console.log('\n[5] 예기치 못한 오류에서 복구');
-  // 적 턴 도중 예외를 일으켜, UI가 멈추지 않고 저장 지점에서 이어가는지 확인
-  await ev(`window.__origAct=enemyAct;enemyAct=()=>{throw new Error('테스트용 강제 오류')};endTurn();'ok'`);
-  const shown = await waitFor(`!!document.querySelector('#modal.show [data-a="reload"]')&&!UI.busy`, 8000);
-  const noted = pageErrors.some(e => /테스트용 강제 오류/.test(e));
-  await ev(`enemyAct=window.__origAct;'ok'`);
-  if (!shown) fail('오류 안내 창이 뜨지 않았거나 UI가 멈춤');
-  else {
-    const turn0 = await ev('JSON.parse(localStorage.getItem(KEY)).combat.turn');
-    await click(await ev(`center(document.querySelector('#modal [data-a="reload"]'))`));
-    const resumed = await waitFor(`${settled}&&S.combat.turn===${turn0 + 1}`, 15000);
-    resumed ? ok('오류 안내 → 마지막 저장 지점에서 이어가기 → 적 턴을 마치고 다음 턴으로') : fail('저장 지점에서 이어가지 못함: ' + JSON.stringify(await ev(`({screen:S&&S.screen,phase:S&&S.combat&&S.combat.phase,busy:UI.busy,turn:S&&S.combat&&S.combat.turn})`)));
+  // 적 턴 마무리(enemyTurnEnd)에서 예외를 낸다 — 적에게 예고 행동이 없어도 매 적 턴 반드시 거치는 단계
+  const FAULT = `enemyTurnEnd=()=>{throw new Error('테스트용 강제 오류')};'ok'`, HEAL = `enemyTurnEnd=window.__origEnd;'ok'`;
+  const modalBtn = a => `!!document.querySelector('#modal.show [data-a="${a}"]')`;
+  const press = async a => click(await ev(`center(document.querySelector('#modal [data-a="${a}"]'))`));
+  await ev(`window.__origEnd=enemyTurnEnd;'ok'`);
+  try {
+    // (a) 한 번 실패 → 안내 → 저장 지점에서 이어가기 → 적 턴을 마치고 다음 턴으로
+    await ev(FAULT); await ev(`endTurn();'ok'`);
+    const shown = await waitFor(`${modalBtn('reload')}&&!UI.busy`, 8000);
+    await ev(HEAL);
+    if (!shown) fail('오류 안내 창이 뜨지 않았거나 UI가 멈춤');
+    else {
+      const turn0 = await ev('JSON.parse(localStorage.getItem(KEY)).combat.turn');
+      await press('reload');
+      const resumed = await waitFor(`${settled}&&S.combat.turn===${turn0 + 1}`, 15000);
+      resumed ? ok('오류 안내 → 마지막 저장 지점에서 이어가기 → 적 턴을 마치고 다음 턴으로') : fail('저장 지점에서 이어가지 못함: ' + JSON.stringify(await ev(`({screen:S&&S.screen,phase:S&&S.combat&&S.combat.phase,busy:UI.busy,turn:S&&S.combat&&S.combat.turn})`)));
+    }
+    // (b) 같은 전투에서 반복 실패 → 오류 정보 복사 → 처음부터 다시
+    await waitFor(settled, 15000);
+    await ev(FAULT); await ev(`endTurn();'ok'`);
+    const first = await waitFor(modalBtn('reload'), 8000);
+    if (first) await press('reload');
+    const second = await waitFor(`${modalBtn('restart')}&&${modalBtn('skip')}`, 8000);
+    if (!first || !second) fail(`반복 오류 탈출구가 나타나지 않음 (1차 안내=${first}, 2차 탈출구=${second})`);
+    else {
+      await press('report');
+      const reported = await waitFor(`(!!document.querySelector('#fataldump textarea')&&document.querySelector('#fataldump textarea').value.includes('"saveVersion"'))||[...document.querySelectorAll('#toast div')].some(d=>d.textContent.includes('복사'))`, 3000);
+      await ev(HEAL);
+      await press('restart');
+      const restarted = await waitFor(`${settled}&&S.combat.turn===1`, 15000);
+      restarted && reported ? ok('반복 오류 → 오류 정보 복사 → 전투 처음부터 다시 → 1턴부터 진행') : fail(`반복 오류 복구: 복사=${reported} 재시작=${restarted}`);
+      // (c) 다시 반복 실패 → 보상 없이 건너뛰고 맵으로
+      await ev(FAULT); await ev(`endTurn();'ok'`);
+      await waitFor(modalBtn('reload'), 8000);
+      await press('reload');
+      await waitFor(modalBtn('skip'), 8000);
+      await ev(HEAL);
+      await press('skip');
+      const skipped = await waitFor(`S&&S.screen==='map'&&!S.combat&&!document.querySelector('#modal.show')`, 8000);
+      skipped ? ok('반복 오류 → 보상 없이 건너뛰고 맵으로') : fail('건너뛰기 후 맵으로 돌아가지 못함');
+    }
+  } finally {
+    await ev(HEAL);
+    await ev(`closeModal();'ok'`);
   }
   // 의도한 오류는 전체 에러 집계에서 뺀다
-  if (noted) pageErrors.splice(0, pageErrors.length, ...pageErrors.filter(e => !/테스트용 강제 오류/.test(e)));
+  pageErrors.splice(0, pageErrors.length, ...pageErrors.filter(e => !/테스트용 강제 오류/.test(e)));
 
   console.log('\n[6] 클래스별 자동 플레이');
   const classes = (process.env.SMOKE_CLASSES || 'warrior,thief,mage,gambler').split(',').map(x => x.trim()).filter(Boolean);
