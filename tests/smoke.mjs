@@ -206,9 +206,11 @@ try {
   // 선택을 풀면 선택 고리가 지워지도록 한 번은 다시 그려야 한다
   const sid = await ev('S.combat.dice[0]&&S.combat.dice[0].id');
   if (sid != null) {
-    await ev(`UI.sel=${sid};'ok'`); await sleep(200); await ev(`UI.sel=null;'ok'`);
-    const f1 = await ev('Tray.frames'); await sleep(300);
-    (await ev('Tray.frames')) > f1 ? ok('선택 해제 후 트레이를 다시 그림 (고리 잔상 없음)') : fail('선택 해제 후 다시 그리지 않아 선택 고리가 남음');
+    await ev(`UI.sel=${sid};'ok'`); await waitFor(`Tray.lastSig.split('|')[2]==='${sid}'`);
+    // 프레임 수 읽기와 선택 해제를 한 번에 해서, 그 사이에 그려진 프레임을 놓치지 않는다
+    const f1 = await ev('(()=>{const f=Tray.frames;UI.sel=null;return f})()');
+    const redrawn = await waitFor(`Tray.frames>${f1}&&Tray.lastSig.split('|')[2]==='null'`, 3000);
+    redrawn ? ok('선택 해제 후 트레이를 다시 그림 (고리 잔상 없음)') : fail('선택 해제 후 다시 그리지 않아 선택 고리가 남음');
   }
 
   console.log('\n[5] 예기치 못한 오류에서 복구');
