@@ -472,7 +472,9 @@ const NODE={fight:{i:'⚔️',n:'전투'},elite:{i:'💀',n:'엘리트'},treasur
 //  런 상태 · 이벤트
 // =====================================================================
 let S=null;            // 현재 런 상태 (전부 JSON 직렬화 가능). UI와 테스트가 교체할 수 있다.
-const SAVE_V=1;
+// 저장 형식을 바꾸면 SAVE_V를 올리고 아래 MIGRATIONS에 '이전 버전 → 다음 버전' 변환을 추가한다.
+// tests/fixtures/save-v*.json(과거 버전의 실제 세이브)은 언제나 최신 버전으로 불러와져야 한다.
+const SAVE_V=2;
 const LVXP=[0,0,2,5,9,14,20,27,35,44,54];
 const STEAL=10;
 const diceCount=()=>(S.level>=6?5:S.level>=3?4:3)+(S.cls==='gambler'?1:0);
@@ -985,8 +987,24 @@ function validCombat(C){
   if(!Array.isArray(C.hand)||!C.hand.every(i=>C.cards[i]))return false;
   return C.dice.every(d=>d&&[1,2,3,4,5,6].includes(d.v));
 }
-// 저장 형식이 바뀌면 이전 버전을 여기서 변환한다. 알 수 없는 버전은 거부.
-function migrate(s){return s&&s.v===SAVE_V?s:null}
+const MIGRATIONS={
+  // v1 → v2: 여신의 거래 결과를 안내 문구(msg) 대신 장비 id(got / upId)로 저장
+  1:s=>{
+    const x=s.ctx;
+    if(x&&x.type==='deal'&&typeof x.msg==='string'){
+      const d=Object.values(IT).filter(d=>!d.mon&&x.msg.includes(d.name)).sort((a,b)=>b.name.length-a.name.length)[0];
+      if(d){if(x.msg.includes('강화해'))x.upId=d.id;else x.got={id:d.id,u:x.msg.includes(d.name+'+')?1:0}}
+      delete x.msg;
+    }
+    return s;
+  },
+};
+// 이전 버전은 한 단계씩 최신으로 변환한다. 변환 경로가 없거나 미래 버전이면 거부.
+function migrate(s){
+  if(!s||typeof s!=='object'||!Number.isInteger(s.v))return null;
+  while(s.v<SAVE_V){const f=MIGRATIONS[s.v];if(!f)return null;s=f(s);s.v++}
+  return s.v===SAVE_V?s:null;
+}
 // 저장 문자열 → {s: 복구된 상태 | null, note: 사용자 안내 | null}
 function parseSave(raw){
   let s;try{s=migrate(JSON.parse(raw))}catch(e){s=null}
@@ -1206,8 +1224,8 @@ const dieImg=(d,col)=>`<img class="dimg" src="${dieURL(d.v,d.fr?'f':col)}" alt="
 // =====================================================================
 //  주사위 트레이 (2D 물리 + 3D 회전 연출)
 // =====================================================================
-const Tray={cv:null,g:null,W:0,H:0,dpr:1,list:[],s:56,wait:[],
-  attach(cv){this.cv=cv;this.g=cv.getContext('2d');this.list=[];this.resize()},
+const Tray={cv:null,g:null,W:0,H:0,dpr:1,list:[],s:56,wait:[],frames:0,lastSig:'',
+  attach(cv){this.cv=cv;this.g=cv.getContext('2d');this.list=[];this.lastSig='';this.resize()},
   detach(){this.cv=null;this.list=[];this.wait.splice(0).forEach(f=>f())},
   resize(){
     if(!this.cv)return;const r=this.cv.getBoundingClientRect();if(!r.width)return;
@@ -1271,6 +1289,13 @@ const Tray={cv:null,g:null,W:0,H:0,dpr:1,list:[],s:56,wait:[],
     if(!this.cv)return;const g=this.g,s=this.s;
     // 키보드 포커스가 주사위 버튼에 있으면 해당 주사위에 점선 고리 (포커스 이벤트 대신 현재 포커스를 직접 읽음)
     const ae=document.activeElement,kf=ae&&ae.dataset&&ae.dataset.did!=null?+ae.dataset.did:null;
+    // 모두 멈춰 있고 보이는 상태도 그대로면 다시 그리지 않는다 (모바일 배터리·CPU 절약).
+    // 움직이는 주사위, 불꽃·선택 고리 같은 반복 연출, 표시 상태(눈·단계·포커스·크기) 변화가 있을 때만 그린다.
+    const moving=this.list.some(d=>d.st!=='rest'||Math.abs(d.x-d.rx)>.5||Math.abs(d.y-d.ry)>.5);
+    const pulsing=UI.sel!=null||!!UI.mode||this.list.some(d=>d.burn);
+    const sig=this.list.map(d=>d.id+':'+d.v+':'+d.st+':'+(d.fr?1:0)).join()+'|'+kf+'|'+UI.sel+'|'+UI.mode+'|'+this.cv.width+'x'+this.cv.height;
+    if(!moving&&!pulsing&&sig===this.lastSig)return;
+    this.lastSig=sig;this.frames++;
     g.setTransform(this.dpr,0,0,this.dpr,0,0);g.clearRect(0,0,this.W,this.H);
     for(const d of this.list){
       if(d.st==='drag'){g.save();g.globalAlpha=.4;g.setLineDash([5,5]);g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.arc(d.rx,d.ry,s*.45,0,Math.PI*2);g.stroke();g.restore();continue}
@@ -1565,6 +1590,24 @@ function renderTitle(){
     }else if(b.dataset.a==='stats')openStats();
     else openHelp();
   };
+}
+// 턴 흐름에서 예외가 나면 UI가 '처리 중'에 멈추지 않도록, 알리고 마지막 저장 지점에서 이어가게 한다
+let fatalAt=0;
+function onFatal(err){
+  if(!err||String(err.message||err)==='Script error.')return; // 다른 출처 스크립트(확장 프로그램 등)의 오류는 무시
+  console.error(err);
+  if(Date.now()-fatalAt<1500)return;fatalAt=Date.now();
+  UI.busy=false;UI.drag=null;UI.mode=null;UI.sel=null;FX.ghost=null;
+  const inRun=!!(S&&!S.dead),canReload=inRun&&!!loadSave();
+  modal(`<h2>⚠ 문제가 생겼어요</h2>
+    <p>진행 중에 예기치 못한 오류가 발생했습니다. ${canReload?'마지막으로 저장된 지점에서 다시 이어갈 수 있어요.':inRun?'저장된 진행이 없어 타이틀로 돌아가야 해요.':''}</p>
+    <p style="font-size:12px;color:var(--dim)">${esc(String(err.message||err)).slice(0,200)}</p>
+    <div class="row">${canReload?'<button class="btn" data-a="reload">💾 마지막 저장 지점에서 이어가기</button>':''}<button class="btn alt" data-a="${inRun?'title':'close'}">${inRun?'🏠 타이틀로':'닫기'}</button></div>`,
+    box=>box.addEventListener('click',e=>{
+      const a=e.target.closest('[data-a]');if(!a)return;
+      if(a.dataset.a==='reload'){closeModal();const s=loadSave();if(!s)return;S=s;$('#screen').innerHTML='';Tray.detach();resume()}
+      else if(a.dataset.a==='title'){closeModal();S=null;VIEW='title';Tray.detach();render()}
+    }));
 }
 function resume(){
   UI.busy=false;UI.hideIntents=false;UI.sel=null;UI.mode=null;
@@ -2126,6 +2169,8 @@ function init(){
     else if(a==='menu')openMenu();
   });
   $('#modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal()});
+  addEventListener('error',e=>onFatal(e.error||e.message));
+  addEventListener('unhandledrejection',e=>onFatal(e.reason));
   document.addEventListener('mouseover',e=>{
     const t=e.target.closest&&e.target.closest('[data-tip],[data-item]');
     if(!t||(UI.drag&&UI.drag.moved)){hideTip();return}

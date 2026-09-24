@@ -1,7 +1,7 @@
 // 스모크 테스트: 헤드리스 Chrome(CDP)으로 index.html을 띄워
 //  1) 핵심 규칙 단위 검사  2) 저장/복구·손상 세이브 처리  3) 최종 보스 승리 경로
-//  4) 실제 마우스 드래그·클릭·키보드 입력과 접근성 트리  5) 클래스별 자동 플레이(탐욕 봇)로
-//     전체 흐름을 돌리며 런타임 에러·진행 멈춤을 잡는다.
+//  4) 실제 마우스 드래그·클릭·키보드 입력, 접근성 트리, 대기 중 다시 그리기  5) 오류 복구
+//  6) 클래스별 자동 플레이(탐욕 봇)로 전체 흐름을 돌리며 런타임 에러·진행 멈춤을 잡는다.
 // 실행: node tests/smoke.mjs   (Node 22+, Chrome/Chromium 필요. CHROME_PATH로 경로 지정 가능)
 // 환경변수: SMOKE_BUDGET_S = 클래스당 자동 플레이 시간 예산(초, 기본 75)
 //          SMOKE_CLASSES = 자동 플레이할 클래스 목록(쉼표 구분, 기본 warrior,thief,mage,gambler)
@@ -70,6 +70,8 @@ async function load() { await send('Page.navigate', { url: URL_ }); await sleep(
 const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
 async function drag(a, b) { await mouse('mousePressed', a.x, a.y); for (let i = 1; i <= 8; i++) await mouse('mouseMoved', a.x + (b.x - a.x) * i / 8, a.y + (b.y - a.y) * i / 8); await mouse('mouseReleased', b.x, b.y) }
 async function click(p) { await mouse('mousePressed', p.x, p.y); await mouse('mouseReleased', p.x, p.y) }
+// 조건식이 참이 될 때까지 기다린다 (고정 대기 대신 — 느린 CI에서도 안정적)
+async function waitFor(expr, ms = 5000) { const t = Date.now(); while (Date.now() - t < ms) { try { if (await ev(expr)) return true } catch { } await sleep(40) } return false }
 async function enter() { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }); await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }) }
 
 // ---------- 페이지에 주입할 테스트 봇 ----------
@@ -155,35 +157,37 @@ try {
   else if (vic.screen === 'gameover') ok('(보스가 먼저 이겨 승리 경로 미확인 — 재시도 권장)');
   else fail('승리 경로: ' + JSON.stringify(vic));
 
-  console.log('\n[4] 실제 입력 (마우스 드래그·클릭, 키보드) · 접근성 트리');
-  const ready = `(async()=>{for(let i=0;i<400&&!(S.combat&&S.combat.phase==='player'&&!UI.busy);i++)await W(20);await W(150);return !!S.combat})()`;
+  console.log('\n[4] 실제 입력 (마우스 드래그·클릭, 키보드) · 접근성 트리 · 대기 중 다시 그리기');
+  // 플레이어 턴이 되고 트레이 주사위가 모두 멈출 때까지 기다린다 (고정 대기 대신 조건 확인)
+  const settled = `S.combat&&S.combat.phase==='player'&&!UI.busy&&Tray.list.length>0&&Tray.list.every(d=>d.st==='rest'&&Math.abs(d.x-d.rx)<1)`;
   await ev(`S=null;wipeSave();newRun('warrior');S.eq=[{id:'sword',u:0},{id:'woodshield',u:0},{id:'hammer',u:0},{id:'flip',u:0}];S.screen='map';render();enterNode(0,0);'ok'`);
-  await ev(ready);
+  if (!await waitFor(settled, 15000)) fail('전투 준비가 끝나지 않음');
   await ev(`S.combat.E.hp=S.combat.E.maxhp=999;render();'ok'`);
   const geo = `(ci,k)=>{const d=S.combat.dice[k],t=Tray.get(d.id),p=Tray.screen(t),c=center(document.querySelector('#pcards [data-ci="'+ci+'"]'));return{id:d.id,v:d.v,die:{x:p.x,y:p.y},card:{x:c.x,y:c.y}}}`;
   // (a) 드래그 앤 드롭: 첫 주사위를 녹슨 검(아무 눈)으로
   const g1 = await ev(`(${geo})(0,0)`);
-  await drag(g1.die, g1.card); await sleep(250);
-  const r1 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${g1.id}),used:S.combat.cards[0].uses===0,hp:S.combat.E.hp})`);
-  r1.gone && r1.used && r1.hp < 999 ? ok(`드래그 앤 드롭 (주사위 ${g1.v} → 녹슨 검)`) : fail('드래그 앤 드롭: ' + JSON.stringify(r1));
+  await drag(g1.die, g1.card);
+  const r1 = await waitFor(`!S.combat.dice.some(d=>d.id===${g1.id})&&S.combat.cards[0].uses===0&&S.combat.E.hp<999`);
+  r1 ? ok(`드래그 앤 드롭 (주사위 ${g1.v} → 녹슨 검)`) : fail('드래그 앤 드롭: ' + JSON.stringify(await ev(`({dice:S.combat.dice.map(d=>d.id),uses:S.combat.cards[0].uses,hp:S.combat.E.hp})`)));
   // (b) 클릭으로 고른 뒤 뒤집개(아무 눈) 클릭
+  await waitFor(settled);
   const g2 = await ev(`(${geo})(3,0)`);
-  await click(g2.die); await sleep(120);
-  const sel = await ev('UI.sel');
-  await click(g2.card); await sleep(250);
-  const r2 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${g2.id}),used:S.combat.cards[3].uses===0})`);
-  sel === g2.id && r2.gone && r2.used ? ok('클릭 선택 → 장비 클릭') : fail(`클릭 배치: sel=${sel} ${JSON.stringify(r2)}`);
+  await click(g2.die);
+  const sel = await waitFor(`UI.sel===${g2.id}`);
+  await click(g2.card);
+  const r2 = await waitFor(`!S.combat.dice.some(d=>d.id===${g2.id})&&S.combat.cards[3].uses===0`);
+  sel && r2 ? ok('클릭 선택 → 장비 클릭') : fail(`클릭 배치: 선택=${sel} 배치=${r2}`);
   // (c) 키보드: 주사위 버튼 포커스 → Enter로 선택, 나무 방패·해머 카드 포커스 → Enter로 투입
-  await sleep(300);
+  await waitFor(settled);
   const kb = await ev(`(()=>{const d=S.combat.dice.find(d=>[1,2].some(ci=>canPlace(ci,d.v)>=0));if(!d)return null;const ci=[1,2].find(ci=>canPlace(ci,d.v)>=0);document.querySelector('#dicebtns [data-did="'+d.id+'"]').focus();return{id:d.id,ci}})()`);
   if (!kb) ok('(키보드 검사 건너뜀: 넣을 수 있는 주사위 없음)');
   else {
-    await enter(); await sleep(120);
-    const ksel = await ev('UI.sel');
+    await enter();
+    const ksel = await waitFor(`UI.sel===${kb.id}`);
     await ev(`document.querySelector('#pcards [data-ci="${kb.ci}"]').focus();'ok'`);
-    await enter(); await sleep(250);
-    const r3 = await ev(`({gone:!S.combat.dice.some(d=>d.id===${kb.id}),phase:S.combat.phase})`);
-    ksel === kb.id && r3.gone && r3.phase === 'player' ? ok('키보드: 주사위 버튼 Enter → 장비 카드 Enter (턴은 유지)') : fail(`키보드 배치: sel=${ksel} ${JSON.stringify(r3)}`);
+    await enter();
+    const r3 = await waitFor(`!S.combat.dice.some(d=>d.id===${kb.id})&&S.combat.phase==='player'`);
+    ksel && r3 ? ok('키보드: 주사위 버튼 Enter → 장비 카드 Enter (턴은 유지)') : fail(`키보드 배치: 선택=${ksel} 배치=${r3}`);
   }
   // (d) 접근성 트리: 스크린리더가 받는 역할·이름
   await send('Accessibility.enable');
@@ -193,8 +197,37 @@ try {
     ['트레이 설명', has(['image', 'img'], /^(내 주사위:|남은 주사위 없음)/)], ['적 예고', ax.some(n => /^적 장비 /.test(n.name))], ['라이브 영역', ax.filter(n => n.role === 'status').length >= 2]];
   const axFail = axChecks.filter(([, v]) => !v).map(([k]) => k);
   axFail.length ? fail('접근성 트리 누락: ' + axFail.join(', ')) : ok('접근성 트리 (주사위 그룹·버튼, 장비 카드, 트레이 설명, 적 예고, 라이브 영역)');
+  // (e) 멈춰 있을 때는 트레이를 다시 그리지 않는다
+  await ev(`document.activeElement&&document.activeElement.blur();UI.sel=null;UI.mode=null;render();'ok'`);
+  await waitFor(settled);
+  await sleep(300);
+  const f0 = await ev('Tray.frames'); await sleep(1000); const idle = (await ev('Tray.frames')) - f0;
+  idle <= 2 ? ok(`대기 중 트레이 다시 그리기 ${idle}프레임/초`) : fail(`대기 중에도 트레이를 계속 그림: ${idle}프레임/초`);
+  // 선택을 풀면 선택 고리가 지워지도록 한 번은 다시 그려야 한다
+  const sid = await ev('S.combat.dice[0]&&S.combat.dice[0].id');
+  if (sid != null) {
+    await ev(`UI.sel=${sid};'ok'`); await sleep(200); await ev(`UI.sel=null;'ok'`);
+    const f1 = await ev('Tray.frames'); await sleep(300);
+    (await ev('Tray.frames')) > f1 ? ok('선택 해제 후 트레이를 다시 그림 (고리 잔상 없음)') : fail('선택 해제 후 다시 그리지 않아 선택 고리가 남음');
+  }
 
-  console.log('\n[5] 클래스별 자동 플레이');
+  console.log('\n[5] 예기치 못한 오류에서 복구');
+  // 적 턴 도중 예외를 일으켜, UI가 멈추지 않고 저장 지점에서 이어가는지 확인
+  await ev(`window.__origAct=enemyAct;enemyAct=()=>{throw new Error('테스트용 강제 오류')};endTurn();'ok'`);
+  const shown = await waitFor(`!!document.querySelector('#modal.show [data-a="reload"]')&&!UI.busy`, 8000);
+  const noted = pageErrors.some(e => /테스트용 강제 오류/.test(e));
+  await ev(`enemyAct=window.__origAct;'ok'`);
+  if (!shown) fail('오류 안내 창이 뜨지 않았거나 UI가 멈춤');
+  else {
+    const turn0 = await ev('JSON.parse(localStorage.getItem(KEY)).combat.turn');
+    await click(await ev(`center(document.querySelector('#modal [data-a="reload"]'))`));
+    const resumed = await waitFor(`${settled}&&S.combat.turn===${turn0 + 1}`, 15000);
+    resumed ? ok('오류 안내 → 마지막 저장 지점에서 이어가기 → 적 턴을 마치고 다음 턴으로') : fail('저장 지점에서 이어가지 못함: ' + JSON.stringify(await ev(`({screen:S&&S.screen,phase:S&&S.combat&&S.combat.phase,busy:UI.busy,turn:S&&S.combat&&S.combat.turn})`)));
+  }
+  // 의도한 오류는 전체 에러 집계에서 뺀다
+  if (noted) pageErrors.splice(0, pageErrors.length, ...pageErrors.filter(e => !/테스트용 강제 오류/.test(e)));
+
+  console.log('\n[6] 클래스별 자동 플레이');
   const classes = (process.env.SMOKE_CLASSES || 'warrior,thief,mage,gambler').split(',').map(x => x.trim()).filter(Boolean);
   for (const [ix, cls] of classes.entries()) {
     const errs0 = pageErrors.length;

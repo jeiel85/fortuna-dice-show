@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const SRC = html.match(/<script id="engine">([\s\S]*?)<\/script>/)[1];
@@ -361,4 +361,26 @@ test('여신의 이벤트: 룰렛·주사위 대결·거래', () => {
   assert.equal(E.ev('canDealBlood()'), false, '체력 12 이하는 피의 거래 불가');
   assert.ok(E.json('dealCoin()'));
   assert.deepEqual(E.json('[S.gold,S.ctx.done,S.eq.some(it=>it.u===1&&it.id===S.ctx.upId)]'), [0, 1, true]);
+});
+
+test('이전 버전 세이브(tests/fixtures)는 최신 형식으로 불러와진다', () => {
+  const E = boot();
+  const V = E.ev('SAVE_V');
+  const dir = new URL('./fixtures/', import.meta.url);
+  const load = f => E.json(`parseSave(${JSON.stringify(readFileSync(new URL(f, dir), 'utf8'))})`);
+  const files = readdirSync(dir).filter(f => /^save-v\d+.*\.json$/.test(f));
+  assert.ok(files.length >= 3, 'fixture가 없음');
+  for (const f of files) {
+    const r = load(f);
+    assert.ok(r.s, `${f}: 불러오기 실패 (${r.note})`);
+    assert.equal(r.s.v, V, `${f}: 최신 버전(${V})으로 변환되지 않음`);
+    assert.equal(r.note, null, `${f}: 손상 복구가 일어남 (${r.note})`);
+  }
+  const deal = load('save-v1-deal-msg.json').s.ctx;
+  assert.deepEqual([deal.got, deal.msg], [{ id: 'rapier', u: 1 }, undefined], 'v1 거래 문구 → 받은 장비');
+  assert.equal(load('save-v1-deal-upgrade.json').s.ctx.upId, 'buckler', 'v1 거래 문구 → 강화한 장비');
+  const c = load('save-v1-combat.json').s;
+  assert.deepEqual([c.screen, c.combat.phase, c.combat.dice.length > 0], ['combat', 'player', true]);
+  // 1 ~ SAVE_V-1 모든 버전에 다음 버전으로 가는 변환이 있어야 한다
+  for (let v = 1; v < V; v++) assert.equal(E.ev(`typeof MIGRATIONS[${v}]`), 'function', `v${v} → v${v + 1} 변환 없음`);
 });
