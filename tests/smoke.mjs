@@ -53,16 +53,24 @@ const pageTarget = targets.find(t => t.type === 'page');
 if (!pageTarget) { console.error('Chrome 페이지 타깃을 찾지 못했습니다.'); proc.kill(); server.close(); process.exit(2) }
 const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
 await new Promise(r => ws.onopen = r);
-let seq = 0; const pending = new Map(); const pageErrors = [];
+let seq = 0; const pending = new Map(); const pageErrors = []; let paused = null;
 ws.onmessage = e => {
   const m = JSON.parse(e.data);
   if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id) }
+  else if (m.method === 'Debugger.paused') paused = m.params;
   else if (m.method === 'Runtime.exceptionThrown') pageErrors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
   else if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') pageErrors.push(m.params.args.map(a => a.value ?? a.description).join(' '));
 };
 const send = (method, params = {}) => new Promise(r => { const id = ++seq; pending.set(id, r); ws.send(JSON.stringify({ id, method, params })) });
-async function ev(expr) {
-  const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+// 페이지가 응답하지 않으면(무한 루프 등) 디버거로 멈춰 호출 스택을 담아 실패시킨다 — 테스트가 영원히 기다리지 않게
+async function ev(expr, ms = 60000) {
+  const r = await Promise.race([send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }), sleep(ms).then(() => null)]);
+  if (!r) {
+    paused = null; send('Debugger.pause');
+    for (let i = 0; i < 50 && !paused; i++) await sleep(100);
+    const stack = paused ? paused.callFrames.slice(0, 10).map(f => `      at ${f.functionName || '(익명)'} (index.html:${f.location.lineNumber + 1})`).join('\n') : '      (호출 스택을 얻지 못함 — 탭이 죽었을 수 있음)';
+    throw new Error(`페이지가 ${ms / 1000}초 동안 응답하지 않음: ${expr.slice(0, 80)}\n${stack}`);
+  }
   if (r.result.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || r.result.exceptionDetails.text);
   return r.result.result.value;
 }
@@ -119,7 +127,7 @@ window.sig=()=>S?[S.screen,S.floor,S.st.turns,S.st.kills,S.combat&&S.combat.turn
 'ok'`;
 
 try {
-  await send('Page.enable'); await send('Runtime.enable');
+  await send('Page.enable'); await send('Runtime.enable'); await send('Debugger.enable');
   await load();
   if (pageErrors.length) fail('로드 중 에러: ' + pageErrors.join(' / ')); else ok('페이지 로드');
 
@@ -274,9 +282,21 @@ try {
       const skipped = await waitFor(`S&&S.screen==='map'&&!S.combat&&!document.querySelector('#modal.show')`, 8000);
       skipped ? ok('반복 오류 → 보상 없이 건너뛰고 맵으로') : fail('건너뛰기 후 맵으로 돌아가지 못함');
     }
+    // (d) 전투가 아닌 방(상점)에서 반복 실패 → 방을 나가 맵으로
+    await ev(`window.__origShop=renderShop;renderShop=()=>{throw new Error('테스트용 강제 오류')};S.combat=null;S.gold=300;setTimeout(()=>enterShop(),0);'ok'`);
+    const r1 = await waitFor(modalBtn('reload'), 8000);
+    if (r1) await press('reload');
+    const leaveShown = await waitFor(modalBtn('leave'), 8000);
+    await ev(`renderShop=window.__origShop;'ok'`);
+    if (!r1 || !leaveShown) fail(`방 탈출구가 나타나지 않음 (1차 안내=${r1}, 2차 탈출구=${leaveShown})`);
+    else {
+      await press('leave');
+      const left = await waitFor(`S&&S.screen==='map'&&!S.ctx&&!document.querySelector('#modal.show')&&!!document.querySelector('svg.map')`, 8000);
+      left ? ok('상점에서 오류 반복 → 방을 나가 맵으로') : fail('방을 나가 맵으로 돌아가지 못함');
+    }
   } finally {
     await ev(HEAL);
-    await ev(`closeModal();'ok'`);
+    await ev(`if(window.__origShop)renderShop=window.__origShop;closeModal();'ok'`);
   }
   // 의도한 오류는 전체 에러 집계에서 뺀다
   pageErrors.splice(0, pageErrors.length, ...pageErrors.filter(e => !/테스트용 강제 오류/.test(e)));

@@ -389,9 +389,12 @@ test('오류 복구용: 전투 처음부터 다시 · 보상 없이 건너뛰기
   const E = boot();
   // 미믹처럼 체력을 바꿔 만든 전투도 같은 조건으로 다시 시작한다
   E.ev(`S=createRun('warrior',0);S.floor=2;visitNode(0,0);S.hp=50;createCombat('normal','mimic',{hp:34});beginPlayerTurn();
-    S.hp=12;S.combat.E.hp=5;S.combat.turn=4;S.combat.pst.poison=3`);
+    S.hp=12;S.gold=3;S.combat.E.hp=5;S.combat.turn=4;S.combat.pst.poison=3`);
   E.ev('restartCombat()');
-  assert.deepEqual(E.json('[S.hp,S.combat.E.hp,S.combat.E.maxhp,S.combat.turn,S.combat.phase,S.combat.pst,S.screen]'), [50, 34, 34, 1, 'start', {}, 'combat']);
+  assert.deepEqual(E.json('[S.hp,S.gold,S.combat.E.hp,S.combat.E.maxhp,S.combat.turn,S.combat.phase,S.combat.pst,S.screen]'), [50, 15, 34, 34, 1, 'start', {}, 'combat'], '체력·골드는 전투 시작 값으로');
+  // gold0이 없는 옛 세이브의 전투는 골드를 건드리지 않는다
+  E.ev('delete S.combat.gold0;S.gold=9;restartCombat()');
+  assert.equal(E.ev('S.gold'), 9);
   // 건너뛰기: 일반 방은 맵으로, 보스방은 다음 층으로 (보상 없음)
   const g = E.ev('S.gold');
   assert.equal(E.ev('skipCombat()'), true);
@@ -400,4 +403,15 @@ test('오류 복구용: 전투 처음부터 다시 · 보상 없이 건너뛰기
   E.ev(`S.pos={r:6,i:0};createCombat('boss','slot')`);
   E.ev('skipCombat()');
   assert.deepEqual(E.json('[S.screen,S.floor,S.pos]'), ['floor', 3, null]);
+});
+
+test('오류 복구용: 전투가 아닌 방을 그대로 나가기', () => {
+  const E = boot();
+  for (const [setup, screen] of [["S.gold=200;openShop()", 'map'], ["S.ctx={type:'deal',done:0};S.screen='event'", 'map'], ["S.ctx={};S.screen='apple'", 'map'], ["S.pos={r:6,i:0};S.ctx={items:[],enemy:{}};S.screen='reward'", 'floor']]) {
+    E.ev(`S=createRun('warrior',0);${setup}`);
+    assert.equal(E.ev('leaveRoom()'), true, setup);
+    assert.deepEqual(E.json('[S.screen,S.ctx]'), [screen, null], setup);
+  }
+  E.ev(`S=createRun('warrior',0);S.screen='map'`);
+  assert.equal(E.ev('leaveRoom()'), false, '맵·전투 화면은 대상이 아님');
 });

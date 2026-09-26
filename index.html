@@ -764,7 +764,7 @@ function createCombat(kind,key,opt={}){
   const d=EN[key],hp=opt.hp||d.hp;
   const E={key,n:d.n,i:d.i,hp,maxhp:hp,block:0,st:{},dice:d.d,pas:d.pas||null,enr:0,idle:[],cards:d.it.map(([id,u])=>mkCard(id,u||0))};
   const cards=S.eq.map(it=>{const c=mkCard(it.id,it.u);if(S.cls==='mage'&&IT[it.id].type==='spell')c.sp=1;return c});
-  S.combat={E,cards,kind,pb:0,pst:{},dice:[],nid:1,turn:1,phase:'start',chain:0,steal:0,sk:0,hand:[],eroll:[],eStart:0,over:0,hp0:S.hp};
+  S.combat={E,cards,kind,pb:0,pst:{},dice:[],nid:1,turn:1,phase:'start',chain:0,steal:0,sk:0,hand:[],eroll:[],eStart:0,over:0,hp0:S.hp,gold0:S.gold};
   S.screen='combat';S.lastEn=key;
   return S.combat;
 }
@@ -860,14 +860,18 @@ function resolveVictory(){
   return{last,lv0};
 }
 function resolveDefeat(){S.combat=null;S.screen='gameover';S.dead=1}
-// 오류 복구용: 저장된 전투 상태 때문에 계속 실패할 때, 같은 적과 처음부터 다시 (체력은 전투 시작 시점으로)
+// 오류 복구용: 저장된 전투 상태 때문에 계속 실패할 때, 같은 적과 처음부터 다시 (체력·골드는 전투 시작 시점으로)
 function restartCombat(){
   const C=S.combat;if(!C)return null;
   if(num(C.hp0))S.hp=clamp(C.hp0,1,S.maxhp);
+  if(num(C.gold0))S.gold=Math.max(0,C.gold0); // 전투 중 빼앗기거나 얻은 골드도 되돌림 (gold0이 없는 옛 세이브는 그대로)
   return createCombat(C.kind,C.E.key,C.E.maxhp!==EN[C.E.key].hp?{hp:C.E.maxhp}:{});
 }
 // 오류 복구용: 보상 없이 전투를 건너뛴다 (보스방이면 다음 층으로)
 function skipCombat(){if(!S.combat)return false;S.combat=null;advanceNode();return true}
+// 오류 복구용: 상점·보물 상자·사과나무·대장간·이벤트·보상 화면을 그대로 나가 맵으로 (보스 보상이면 다음 층으로)
+const ROOMS=['shop','treasure','apple','forge','event','reward'];
+function leaveRoom(){if(!ROOMS.includes(S.screen))return false;advanceNode();return true}
 
 // =====================================================================
 //  장비 관리 · 강화 (ref = {it, l:'eq'|'bag', i})
@@ -1612,15 +1616,17 @@ function onFatal(err){
   // 같은 방(층·위치·화면)에서 플레이어 턴까지 가지 못하고 연달아 실패하면, 저장 상태 자체가 원인일 수 있다
   const key=inRun?`${S.floor}:${S.pos?S.pos.r+','+S.pos.i:'-'}:${S.screen}`:'';
   fatalCount=key&&key===fatalKey?fatalCount+1:1;fatalKey=key;
-  const stuck=fatalCount>=2&&!!saved&&saved.screen==='combat'&&!!saved.combat;
+  const again=fatalCount>=2&&!!saved;
+  const stuck=again&&saved.screen==='combat'&&!!saved.combat, stuckRoom=again&&ROOMS.includes(saved.screen);
   const msg=String(err.message||err);
   const report=JSON.stringify({error:String(err.stack||msg),at:new Date().toISOString(),ua:navigator.userAgent,saveVersion:SAVE_V,repeat:fatalCount,save:saved||S||null},null,1);
   modal(`<h2>⚠ 문제가 생겼어요</h2>
-    <p>${stuck?'같은 전투에서 오류가 반복되고 있어요. 전투를 처음부터 다시 하거나, 보상 없이 건너뛸 수 있어요.':saved?'진행 중에 예기치 못한 오류가 발생했습니다. 마지막으로 저장된 지점에서 다시 이어갈 수 있어요.':inRun?'진행 중에 예기치 못한 오류가 발생했습니다. 저장된 진행이 없어 타이틀로 돌아가야 해요.':'예기치 못한 오류가 발생했습니다.'}</p>
+    <p>${stuck?'같은 전투에서 오류가 반복되고 있어요. 전투를 처음부터 다시 하거나, 보상 없이 건너뛸 수 있어요.':stuckRoom?'이 방에서 오류가 반복되고 있어요. 방을 그대로 나가 맵으로 돌아갈 수 있어요.':saved?'진행 중에 예기치 못한 오류가 발생했습니다. 마지막으로 저장된 지점에서 다시 이어갈 수 있어요.':inRun?'진행 중에 예기치 못한 오류가 발생했습니다. 저장된 진행이 없어 타이틀로 돌아가야 해요.':'예기치 못한 오류가 발생했습니다.'}</p>
     <p style="font-size:12px;color:var(--dim)">${esc(msg).slice(0,200)}</p>
     <div id="fataldump"></div>
     <div class="row">
       ${stuck?'<button class="btn" data-a="restart">🔁 이 전투를 처음부터 다시</button><button class="btn alt" data-a="skip">⏭ 보상 없이 건너뛰고 맵으로</button>'
+        :stuckRoom?'<button class="btn" data-a="leave">🚪 이 방을 나가 맵으로</button>'
         :saved?'<button class="btn" data-a="reload">💾 마지막 저장 지점에서 이어가기</button>':''}
       <button class="btn alt" data-a="report">📋 오류 정보 복사</button>
       <button class="btn alt" data-a="${inRun?'title':'close'}">${inRun?'🏠 타이틀로':'닫기'}</button>
@@ -1632,6 +1638,7 @@ function onFatal(err){
         case 'reload':{const s=loadSave();if(!s)return;fresh();S=s;resume();break}
         case 'restart':{const s=loadSave();if(!s)return;fresh();S=s;const C=restartCombat();if(C)beginCombatUI(C);else render();toast('🔁 전투를 처음부터 다시 시작합니다.');break}
         case 'skip':{const s=loadSave();if(!s)return;fresh();S=s;skipCombat();save();render();toast('⏭ 전투를 건너뛰었습니다.');break}
+        case 'leave':{const s=loadSave();if(!s)return;fresh();S=s;leaveRoom();save();render();toast('🚪 방을 나와 맵으로 돌아왔습니다.');break}
         case 'report':copyText(report,'#fataldump');break;
         case 'title':closeModal();S=null;VIEW='title';Tray.detach();render();break;
       }
