@@ -1,6 +1,6 @@
 /* 포르투나의 주사위 쇼 서비스 워커
  * - 앱 셸(index.html·manifest·아이콘)만 미리 캐시한다.
- * - 페이지 이동(navigation)은 네트워크 우선, 실패하면 캐시된 index.html로 오프라인 실행.
+ * - 앱 셸(scope 루트·index.html)로의 페이지 이동은 네트워크 우선, 실패하면 캐시된 index.html로 오프라인 실행.
  * - 그 밖의 같은 출처 GET 요청은 stale-while-revalidate(캐시를 먼저 주고 뒤에서 갱신).
  * - 다른 출처(CDN 등) 요청은 건드리지 않는다.
  * 배포 내용이 바뀌어 캐시를 비워야 하면 CACHE_VERSION을 올린다.
@@ -16,6 +16,12 @@ const PRECACHE = [
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
 ];
+
+// 앱 셸 주소: scope 루트(…/<repo>/)와 …/<repo>/index.html. 이 두 주소로의 이동 응답만 오프라인 셸로 저장한다.
+const SCOPE_PATH = new URL(self.registration.scope).pathname;
+function isAppShell(url) {
+  return url.pathname === SCOPE_PATH || url.pathname === `${SCOPE_PATH}index.html`;
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -70,7 +76,7 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || request.headers.has('range')) return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (request.mode === 'navigate') {
+  if (request.mode === 'navigate' && isAppShell(url)) {
     event.respondWith(networkFirstPage(request));
     return;
   }
